@@ -1,0 +1,83 @@
+{
+  "protected_senders": [
+    "@mycompany.com",
+    "recruiter@",
+    "noreply@mybank.com"
+  ],
+  "important_topics": [
+    "job",
+    "interview",
+    "deadline",
+    "offer letter",
+    "security alert",
+    "account compromised"
+  ],
+  "notify_rules": {
+    "keywords": [
+      "interview",
+      "job offer",
+      "application status",
+      "recruiter",
+      "hiring manager",
+      "deadline",
+      "urgent",
+      "security alert",
+      "suspicious login",
+      "unauthorized transaction"
+    ],
+    "senders": [
+      "@mycompany.com",
+      "@workday.com",
+      "@greenhouse.io",
+      "@lever.co"
+    ]
+  },
+  "digest_rules": {
+    "keywords": [
+      "family",
+      "friend",
+      "reunion",
+      "birthday",
+      "ai news",
+      "new model",
+      "language model",
+      "ai agent",
+      "hackathon",
+      "monthly statement",
+      "account summary"
+    ],
+    "senders": [
+      "@substack.com",
+      "@techcrunch.com"
+    ]
+  },
+  "mute_rules": {
+    "keywords": [
+      "sale",
+      "discount",
+      "limited time offer",
+      "buy now",
+      "unsubscribe",
+      "% off",
+      "clearance",
+      "promo code"
+    ],
+    "senders": [
+      "@marketing.",
+      "@promotions."
+    ]
+  },
+  "quarantine_rules": {
+    "keywords": [
+      "verify your password",
+      "your account has been suspended",
+      "click here immediately",
+      "wire transfer",
+      "gift card",
+      "you have won",
+      "urgent action required",
+      "confirm your identity"
+    ],
+    "senders": []
+  }
+}
