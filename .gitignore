@@ -1,0 +1,29 @@
+# --- Secrets: never commit ---
+.env
+credentials/
+client_secret.json
+token.json
+.streamlit/secrets.toml
+
+# --- Local data / generated state ---
+*.db
+data/app.db
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+.mypy_cache/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

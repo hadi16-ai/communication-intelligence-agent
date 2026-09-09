@@ -1,0 +1,24 @@
+# Dashboard
+streamlit
+
+# Gemini (current recommended SDK, not the deprecated google-generativeai)
+google-genai
+
+# Gmail API + OAuth (read-only in Version 1)
+google-api-python-client
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+
+# Schemas / config
+pydantic>=2
+pydantic-settings
+python-dotenv
+
+# Reliability: controlled retries around transient API failures
+# (rate limits, temporary network errors) for Gmail/Gemini calls
+tenacity
+
+# Testing
+pytest
+pytest-mock
