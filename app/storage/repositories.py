@@ -192,12 +192,27 @@ class EmailRepository:
             ).fetchone()
         if row is None:
             return None
+        return self._row_to_stored_record(row)
 
+    def list_records(self) -> list[StoredEmailRecord]:
+        """Every stored record, most recently processed first.
+
+        Used by the dashboard (and anything else that needs to enumerate
+        everything rather than look up one message_id). A record whose
+        classification exists but hasn't been decided yet is still
+        included, with `decision=None` — callers must handle that rather
+        than assume every row has a decision.
+        """
+        with get_connection(self._db_path) as conn:
+            rows = conn.execute("SELECT * FROM email_records ORDER BY processed_at DESC").fetchall()
+        return [self._row_to_stored_record(row) for row in rows]
+
+    def _row_to_stored_record(self, row) -> StoredEmailRecord:
         try:
             received_at = datetime.fromisoformat(row["email_timestamp"])
         except ValueError as exc:
             raise StorageError(
-                f"Stored email_timestamp for message_id {message_id!r} is malformed: {exc}"
+                f"Stored email_timestamp for message_id {row['message_id']!r} is malformed: {exc}"
             ) from exc
 
         classification = self._row_to_classification(row)

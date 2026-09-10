@@ -109,6 +109,57 @@ class TestSaveAndRetrieve:
         assert repo.get_decision("msg-1").category == Category.NOTIFY
 
 
+class TestListRecords:
+    def test_empty_database_returns_empty_list(self, repo):
+        assert repo.list_records() == []
+
+    def test_returns_every_saved_record(self, repo):
+        for message_id in ("msg-1", "msg-2", "msg-3"):
+            email = make_email(message_id=message_id)
+            classification = make_classification(message_id=message_id)
+            repo.save_classification(email, classification)
+
+        records = repo.list_records()
+
+        assert {r.message_id for r in records} == {"msg-1", "msg-2", "msg-3"}
+
+    def test_includes_records_without_a_decision_yet(self, repo):
+        email = make_email(message_id="msg-1")
+        classification = make_classification(message_id="msg-1")
+        repo.save_classification(email, classification)
+
+        records = repo.list_records()
+
+        assert len(records) == 1
+        assert records[0].decision is None
+
+    def test_includes_decision_when_present(self, repo):
+        email = make_email(message_id="msg-1")
+        classification = make_classification(message_id="msg-1")
+        decision = make_decision(classification=classification)
+        repo.save_classification(email, classification)
+        repo.save_decision(decision)
+
+        records = repo.list_records()
+
+        assert records[0].decision == decision
+
+    def test_malformed_record_raises_storage_error(self, repo):
+        email = make_email(message_id="msg-bad")
+        classification = make_classification(message_id="msg-bad")
+        repo.save_classification(email, classification)
+
+        with get_connection(repo._db_path) as conn:
+            conn.execute(
+                "UPDATE email_records SET classification_category = ? WHERE message_id = ?",
+                ("NOT_A_REAL_CATEGORY", "msg-bad"),
+            )
+            conn.commit()
+
+        with pytest.raises(StorageError):
+            repo.list_records()
+
+
 class TestClassificationRoundTrip:
     def test_all_fields_survive_round_trip(self, repo):
         email = make_email(message_id="msg-rt")
