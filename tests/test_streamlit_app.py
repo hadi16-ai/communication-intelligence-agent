@@ -48,7 +48,12 @@ class TestEmptyState:
 
         assert len(at.exception) == 0
         assert any("No processed emails yet" in info.value for info in at.info)
-        assert len(at.metric) == 0
+        # The Inbox tab itself shows no metrics when empty; the sibling
+        # Evaluation tab (added in M9) always renders its own overview
+        # metrics (0/41, 0% coverage, etc.), so assert on the absence of
+        # Inbox-specific metrics rather than zero metrics globally.
+        inbox_labels = {"🔴 NOTIFY", "🟡 DIGEST", "⚪ MUTE", "🛡️ QUARANTINE", "Total processed"}
+        assert not any(m.label in inbox_labels for m in at.metric)
 
 
 class TestPopulatedDashboard:

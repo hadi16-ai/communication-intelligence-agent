@@ -13,10 +13,15 @@ Decision -> Repository/SQLite -> (this file reads only, from here on)
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import streamlit as st
 
 from app.core.config import Settings
+from app.core.decisions import DecisionEngine
 from app.core.models import Category, DecisionSource
+from app.evaluation.evaluator import EvaluationReport, evaluate
+from app.preferences.manager import PreferenceManager
 from app.storage.repositories import EmailRepository
 from app.ui.dashboard_data import (
     CATEGORY_EMOJI,
@@ -27,12 +32,21 @@ from app.ui.dashboard_data import (
     summarize,
     to_table_row,
 )
+from app.ui.evaluation_view import (
+    category_metrics_rows,
+    confusion_matrix_rows,
+    coverage_message,
+    format_recall,
+    mismatch_rows,
+)
 
 st.set_page_config(
     page_title="Communication Intelligence Agent",
     page_icon="📬",
     layout="wide",
 )
+
+PREFERENCES_PATH = Path(__file__).resolve().parent.parent / "data" / "preferences.json"
 
 
 def _get_repository() -> EmailRepository:
@@ -49,6 +63,10 @@ def _get_repository() -> EmailRepository:
     repository = EmailRepository(settings.database_path)
     repository.initialize()
     return repository
+
+
+def _get_preferences() -> PreferenceManager:
+    return PreferenceManager.from_file(PREFERENCES_PATH)
 
 
 def render_header() -> None:
@@ -158,10 +176,7 @@ def render_detail(filtered_records) -> None:
             st.caption(decision.reasoning)
 
 
-def main() -> None:
-    render_header()
-
-    repository = _get_repository()
+def render_inbox_tab(repository: EmailRepository) -> None:
     records = load_records(repository)
 
     if not records:
@@ -181,6 +196,108 @@ def main() -> None:
     render_table(filtered_records)
     st.divider()
     render_detail(filtered_records)
+
+
+def render_evaluation_tab(repository: EmailRepository) -> None:
+    """Read-only evaluation of stored classifications/decisions against
+    data/eval_dataset.json ground truth. Computes nothing itself beyond
+    calling app.evaluation.evaluate() — no Gemini call, no metric math
+    lives in this file (see app/evaluation and app/ui/evaluation_view.py).
+    """
+    preferences = _get_preferences()
+    report: EvaluationReport = evaluate(repository, preferences, DecisionEngine())
+    coverage = report.coverage
+
+    message = coverage_message(report)
+    if coverage.is_partial:
+        st.warning(f"⚠️ {message}")
+        if coverage.missing_message_ids:
+            with st.expander(f"{coverage.missing_count} email(s) not yet evaluated"):
+                st.write(", ".join(coverage.missing_message_ids))
+    else:
+        st.success(message)
+
+    st.subheader("Overview")
+    overview_cols = st.columns(4)
+    overview_cols[0].metric("Evaluated", coverage.evaluated_count)
+    overview_cols[1].metric("Total in dataset", coverage.total_count)
+    overview_cols[2].metric("Coverage", f"{coverage.coverage_percent:.1f}%")
+    overview_cols[3].metric("Classification accuracy", f"{report.classification.accuracy * 100:.1f}%")
+
+    if coverage.evaluated_count == 0:
+        st.info("Nothing has been evaluated yet — no stored classifications match the dataset.")
+        return
+
+    st.divider()
+    st.subheader("🛡️ Safety-critical metrics")
+    st.caption(
+        "Missing a genuinely important job/interview/security email is more costly than an "
+        "extra notification; failing to quarantine dangerous content is separately safety-critical."
+    )
+    safety_cols = st.columns(4)
+    safety_cols[0].metric(
+        f"{CATEGORY_EMOJI[Category.NOTIFY]} NOTIFY recall (classification)",
+        format_recall(report.classification.per_category[Category.NOTIFY]),
+    )
+    safety_cols[1].metric(
+        f"{CATEGORY_EMOJI[Category.NOTIFY]} NOTIFY recall (decision)",
+        format_recall(report.decision.per_category[Category.NOTIFY]),
+    )
+    safety_cols[2].metric(
+        f"{CATEGORY_EMOJI[Category.QUARANTINE]} QUARANTINE recall (classification)",
+        format_recall(report.classification.per_category[Category.QUARANTINE]),
+    )
+    safety_cols[3].metric(
+        f"{CATEGORY_EMOJI[Category.QUARANTINE]} QUARANTINE recall (decision)",
+        format_recall(report.decision.per_category[Category.QUARANTINE]),
+    )
+
+    st.divider()
+    class_col, decision_col = st.columns(2)
+
+    with class_col:
+        st.markdown("#### Classification metrics")
+        st.caption("AI-understood category vs. dataset expected_category")
+        st.dataframe(category_metrics_rows(report.classification.per_category), hide_index=True, width="stretch")
+        st.caption(
+            f"Macro precision {report.classification.macro_precision:.3f} · "
+            f"macro recall {report.classification.macro_recall:.3f} · "
+            f"macro F1 {report.classification.macro_f1:.3f}"
+        )
+        st.markdown("**Confusion matrix — classification**")
+        st.dataframe(confusion_matrix_rows(report.classification.confusion_matrix), hide_index=True, width="stretch")
+
+    with decision_col:
+        st.markdown("#### Decision metrics")
+        st.caption("Final decision vs. expected outcome of the existing decision policy")
+        st.dataframe(category_metrics_rows(report.decision.per_category), hide_index=True, width="stretch")
+        st.caption(
+            f"Macro precision {report.decision.macro_precision:.3f} · "
+            f"macro recall {report.decision.macro_recall:.3f} · "
+            f"macro F1 {report.decision.macro_f1:.3f}"
+        )
+        st.markdown("**Confusion matrix — decision**")
+        st.dataframe(confusion_matrix_rows(report.decision.confusion_matrix), hide_index=True, width="stretch")
+
+    if report.classification_mismatches:
+        with st.expander(f"Classification mismatches ({len(report.classification_mismatches)})"):
+            st.dataframe(mismatch_rows(report.classification_mismatches), hide_index=True, width="stretch")
+
+    if report.decision_mismatches:
+        with st.expander(f"Decision mismatches ({len(report.decision_mismatches)})"):
+            st.dataframe(mismatch_rows(report.decision_mismatches), hide_index=True, width="stretch")
+
+
+def main() -> None:
+    render_header()
+
+    repository = _get_repository()
+
+    inbox_tab, evaluation_tab = st.tabs(["📥 Inbox", "📊 Evaluation"])
+    with inbox_tab:
+        render_inbox_tab(repository)
+    with evaluation_tab:
+        render_evaluation_tab(repository)
 
 
 main()
