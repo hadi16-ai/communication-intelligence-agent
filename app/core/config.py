@@ -38,3 +38,4 @@ class Settings(BaseSettings):
     # Gmail OAuth (paths only — the files themselves are never committed)
     gmail_client_secret_path: str = "credentials/client_secret.json"
     gmail_token_path: str = "credentials/token.json"
+    gmail_fetch_max_results: int = 10

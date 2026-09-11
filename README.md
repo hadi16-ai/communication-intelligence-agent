@@ -36,7 +36,13 @@ milestone table below.
 | M7 | End-to-end synthetic pipeline | ✅ |
 | M8 | Streamlit dashboard | ✅ |
 | M9 | Evaluation and quality metrics | ✅ (architecture complete; **data partial**, see below) |
-| M10 | Gmail read-only integration | pending |
+| M10 | Gmail read-only integration | ✅ |
+
+**Version 1 is now architecturally complete.** The only remaining work before
+declaring V1 done is operational, not architectural: resolve the Gemini
+billing/rate-limit issue, run the one-off paid-tier verification, process
+the remaining 35 evaluation emails, and confirm a full 41/41 evaluation —
+see "Evaluation" below.
 
 **A note on real Gemini usage:** a live 41-email evaluation run against the
 real Gemini API was started and hit a free-tier rate limit (5 requests/min)
@@ -87,8 +93,8 @@ app/
         decisions.py        # deterministic preference-override logic (M5)
         pipeline.py          # cache-lookup -> CLASSIFY -> DECIDE -> STORE orchestration (M7)
     gmail/
-        client.py          # read-only Gmail API client (M10)
-        parser.py          # raw Gmail message -> EmailMessage (M10)
+        client.py          # read-only Gmail API client + fetch_recent_messages (M10)
+        parser.py          # raw Gmail message -> EmailMessage, MIME/HTML handling (M10)
     ai/
         classifier.py      # BaseClassifier interface + factory (M4)
         gemini.py           # Gemini implementation (M4)
@@ -105,6 +111,7 @@ app/
     ui/
         dashboard_data.py   # pure Inbox-tab data shaping, no streamlit import (M8)
         evaluation_view.py   # pure Evaluation-tab data shaping, no streamlit import (M9)
+        gmail_view.py         # pure Gmail-tab connection check + fetch/process orchestration (M10)
     utils/
         logging.py         # structured, privacy-safe logging (M1+)
 
@@ -203,13 +210,127 @@ already-cached 6 are never re-classified, since caching is keyed by
 same `python scripts/run_evaluation.py` command, and the same dashboard
 tab, will automatically report full 41/41 coverage once those rows exist.
 
+## V1 Gmail Integration
+
+Gmail access in Version 1 is **strictly read-only** — this is a hard
+architectural property, not just a policy. The application requests only
+the narrowest Gmail scope that allows reading mail, and no method anywhere
+in the codebase (`app/gmail/client.py`'s `GmailClient`) can send, delete,
+archive, label, or modify anything in the mailbox. There is no button,
+script, or code path in V1 that mutates Gmail in any way.
+
+**How messages flow through the system:**
+
+```
+Gmail API (read-only) → GmailClient.get_message()
+    → app/gmail/parser.py (MIME/HTML → plain text) → EmailMessage
+    → EmailProcessor (existing M7 pipeline: cache -> classify -> decide -> store)
+    → ClassificationResult → Decision → SQLite
+    → Streamlit "Inbox" / "Evaluation" tabs
+```
+
+A Gmail message becomes an ordinary `EmailMessage` and goes through the
+*exact same* `EmailProcessor` as the synthetic dataset — there is no
+parallel Gmail-specific classification or storage path, and no separate
+cache. Gmail email content (sender, subject, body) is treated as
+**untrusted input**, exactly like the synthetic emails: nothing in the
+Gmail adapter interprets or executes anything inside a message (HTML is
+converted to plain text only, script/style tags are stripped and never
+run, attachments are never opened), and the existing prompt-injection
+defenses in the Gemini classifier apply unchanged.
+
+**OAuth scope.** V1 requests exactly one scope:
+
+```
+https://www.googleapis.com/auth/gmail.readonly
+```
+
+Not `gmail.modify`, not `gmail.compose`, not `gmail.send`, not
+`gmail.labels`, not `gmail.settings.basic`, not the full `mail.google.com`
+scope — this is the narrowest scope Google offers for reading mail, and
+it makes send/delete/modify actions impossible for this app's credentials
+regardless of what code might otherwise attempt.
+
+**One-time setup:**
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create (or
+   use) a project, enable the **Gmail API**, and create an **OAuth Client
+   ID** of type **Desktop app**.
+2. Download its JSON and save it locally at the path configured by
+   `GMAIL_CLIENT_SECRET_PATH` in your `.env` (default:
+   `credentials/client_secret.json`). This path is already covered by
+   `.gitignore` (`credentials/`, `client_secret.json`) — **never commit
+   this file.**
+3. Run the one-time interactive authorization script from a terminal
+   (not from inside Streamlit — the browser consent flow doesn't fit a
+   Streamlit script rerun):
+   ```bash
+   python scripts/authorize_gmail.py
+   ```
+   A browser window opens for you to sign in and grant **read-only**
+   access. On success, a token is saved at `GMAIL_TOKEN_PATH` (default:
+   `credentials/token.json`) — also gitignored, also never committed.
+   The Streamlit app reuses and auto-refreshes this token; you should not
+   need to run this script again unless the token is revoked or deleted.
+
+**Running the app and connecting Gmail:**
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+Open the **"📧 Gmail"** tab. If not yet connected, it shows the exact
+command above and where the client secret is expected — it never attempts
+the OAuth flow itself. Once connected, it shows a **"🔒 Read-only Gmail
+access"** notice, a control for how many recent messages to fetch (capped
+by `GMAIL_FETCH_MAX_RESULTS`, default 10), and a single **"Fetch and
+process messages"** button — no other Gmail action exists in the UI.
+Fetching reuses the existing `message_id`-based SQLite cache (M6): a Gmail
+message already classified is never re-sent to Gemini, and its existing
+decision is simply displayed.
+
+**What is and isn't persisted.** Exactly the same rule as everywhere else
+in this project: SQLite stores metadata and derived classification/decision
+fields only (`message_id`, sender, subject, timestamp, category, urgency,
+confidence, risk flags, reasoning, decision) — **never the raw email
+body**. The Gmail adapter reads a message's body only transiently, to hand
+it to the classifier; no body column exists in the schema, and none is
+added by this integration.
+
+**Future versions.** V1 is deliberately observation/classification/decision
+only. A future V2 may add carefully scoped, explicitly-confirmed safe
+actions (e.g. archiving a MUTE-decided email) — but that requires a
+broader OAuth scope, new confirmation UX, and is out of scope here by
+design, not by oversight.
+
 ## Setup
 
-Setup instructions (virtual environment, dependencies, Gemini API key, Gmail
-OAuth) will be filled in as the corresponding milestones land. For now:
+**Prerequisites:** Python 3.10+.
 
 ```bash
 python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS/Linux
+pip install -r requirements.txt
+```
+
+Copy `.env.example` to `.env` and fill in `GEMINI_API_KEY` (see
+[Google AI Studio](https://aistudio.google.com/)). `.env` is gitignored —
+never commit it.
+
+For Gmail access, see "V1 Gmail Integration" above (optional — the
+dashboard, evaluation, and synthetic-dataset pipeline all work without it).
+
+Run the test suite:
+
+```bash
+pytest
+```
+
+Run the dashboard:
+
+```bash
+streamlit run app/streamlit_app.py
 ```
 
 ## License

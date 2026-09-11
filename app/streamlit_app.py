@@ -1,14 +1,18 @@
-"""Streamlit dashboard: read-only presentation layer over the existing
-SQLite-backed EmailRepository.
+"""Streamlit dashboard: presentation layer over the existing SQLite-backed
+EmailRepository, plus a Gmail sync action.
 
-Architecture reminder: this file contains NO classification or decision
-logic of its own. It only reads what app.ai / app.core.decisions / app.
-storage already produced and stored (see app/core/pipeline.py for how
-those get populated). It never calls Gemini, never touches Gmail, and
-never writes anything back to the database.
+Architecture reminder: this file contains NO classification, decision, or
+Gmail-API logic of its own — those stay in app.ai, app.core.decisions, and
+app.gmail respectively. The Inbox and Evaluation tabs only read what was
+already stored. The Gmail tab's "Fetch and process" button is the one
+place this file triggers work: it calls the existing, unmodified
+GmailClient (read-only) and EmailProcessor (cache -> classify -> decide ->
+store) — the exact same pipeline every other EmailMessage source uses,
+never a parallel path, and Gmail access is always read-only.
 
-EmailMessage -> Classifier -> ClassificationResult -> DecisionEngine ->
-Decision -> Repository/SQLite -> (this file reads only, from here on)
+Gmail API (read-only) -> app.gmail (fetch + normalize) -> EmailMessage ->
+Classifier -> ClassificationResult -> DecisionEngine -> Decision ->
+Repository/SQLite -> this file (display, and the one Gmail sync action)
 """
 
 from __future__ import annotations
@@ -17,11 +21,14 @@ from pathlib import Path
 
 import streamlit as st
 
+from app.ai.classifier import ClassificationError, get_classifier
 from app.core.config import Settings
 from app.core.decisions import DecisionEngine
 from app.core.models import Category, DecisionSource
 from app.evaluation.evaluator import EvaluationReport, evaluate
+from app.gmail.client import GmailAPIError, GmailAuthError, GmailClient
 from app.preferences.manager import PreferenceManager
+from app.core.pipeline import EmailProcessor
 from app.storage.repositories import EmailRepository
 from app.ui.dashboard_data import (
     CATEGORY_EMOJI,
@@ -39,6 +46,7 @@ from app.ui.evaluation_view import (
     format_recall,
     mismatch_rows,
 )
+from app.ui.gmail_view import format_sync_summary, gmail_is_connected, sync_gmail
 
 st.set_page_config(
     page_title="Communication Intelligence Agent",
@@ -67,6 +75,20 @@ def _get_repository() -> EmailRepository:
 
 def _get_preferences() -> PreferenceManager:
     return PreferenceManager.from_file(PREFERENCES_PATH)
+
+
+def _get_gmail_client(settings: Settings) -> GmailClient:
+    """Isolated so tests can monkeypatch this one function to inject a
+    fake client rather than needing real Gmail credentials.
+    """
+    return GmailClient.from_token_file(settings.gmail_token_path, settings.gmail_client_secret_path)
+
+
+def _get_pipeline_classifier(settings: Settings):
+    """Isolated so tests can monkeypatch this one function to inject a
+    fake classifier rather than making a real Gemini call.
+    """
+    return get_classifier(settings)
 
 
 def render_header() -> None:
@@ -288,16 +310,102 @@ def render_evaluation_tab(repository: EmailRepository) -> None:
             st.dataframe(mismatch_rows(report.decision_mismatches), hide_index=True, width="stretch")
 
 
+_GMAIL_SYNC_MESSAGE_KEY = "gmail_sync_message"
+_GMAIL_SYNC_FAILURES_KEY = "gmail_sync_failures"
+
+
+def render_gmail_tab(repository: EmailRepository) -> None:
+    """Lets the user manually pull a small number of recent Gmail
+    messages through the existing pipeline. Read-only: no send, delete,
+    archive, label, or reply action exists anywhere in this function or
+    anything it calls.
+
+    A successful (or failed) fetch triggers `st.rerun()` after stashing
+    the outcome in `st.session_state`: Streamlit reruns the whole script
+    top-to-bottom on every interaction, and the Inbox/Evaluation tabs
+    render *before* this tab in that same pass — without the rerun, a
+    freshly fetched email wouldn't appear in the Inbox until some later,
+    unrelated interaction.
+    """
+    settings = Settings()
+
+    st.info(
+        "🔒 **Read-only Gmail access.** This application can only read your inbox. "
+        "It cannot delete, archive, label, reply to, forward, or send any email — "
+        "no such capability exists anywhere in the app."
+    )
+
+    if _GMAIL_SYNC_MESSAGE_KEY in st.session_state:
+        kind, message = st.session_state.pop(_GMAIL_SYNC_MESSAGE_KEY)
+        getattr(st, kind)(message)
+    failures = st.session_state.pop(_GMAIL_SYNC_FAILURES_KEY, [])
+    if failures:
+        with st.expander(f"{len(failures)} message(s) failed to process"):
+            for message_id, error in failures:
+                st.write(f"`{message_id}`: {error}")
+
+    if not gmail_is_connected(settings.gmail_token_path):
+        st.warning("Gmail is not connected yet.")
+        st.markdown(
+            "Run this once from a terminal (not from inside Streamlit) to connect your "
+            "Gmail account with **read-only** access:"
+        )
+        st.code("python scripts/authorize_gmail.py", language="bash")
+        st.caption(
+            f"Requires an OAuth client secret at `{settings.gmail_client_secret_path}` — "
+            "see README → 'V1 Gmail Integration' for setup steps."
+        )
+        return
+
+    st.success("✅ Gmail connected (read-only).")
+
+    max_allowed = max(settings.gmail_fetch_max_results, 1)
+    fetch_count = st.number_input(
+        "Number of recent messages to fetch",
+        min_value=1,
+        max_value=max_allowed,
+        value=min(5, max_allowed),
+        step=1,
+    )
+
+    if st.button("Fetch and process messages"):
+        try:
+            with st.spinner("Fetching and processing..."):
+                client = _get_gmail_client(settings)
+                processor = EmailProcessor(
+                    classifier=_get_pipeline_classifier(settings),
+                    preferences=_get_preferences(),
+                    decision_engine=DecisionEngine(),
+                    repository=repository,
+                )
+                result = sync_gmail(client, processor, int(fetch_count))
+        except GmailAuthError as exc:
+            st.session_state[_GMAIL_SYNC_MESSAGE_KEY] = ("error", f"Gmail authentication error: {exc}")
+            st.rerun()
+        except GmailAPIError as exc:
+            st.session_state[_GMAIL_SYNC_MESSAGE_KEY] = ("error", f"Gmail API error: {exc}")
+            st.rerun()
+        except ClassificationError as exc:
+            st.session_state[_GMAIL_SYNC_MESSAGE_KEY] = ("error", f"Classifier error: {exc}")
+            st.rerun()
+        else:
+            st.session_state[_GMAIL_SYNC_MESSAGE_KEY] = ("success", format_sync_summary(result))
+            st.session_state[_GMAIL_SYNC_FAILURES_KEY] = result.fetch.failed_message_ids
+            st.rerun()
+
+
 def main() -> None:
     render_header()
 
     repository = _get_repository()
 
-    inbox_tab, evaluation_tab = st.tabs(["📥 Inbox", "📊 Evaluation"])
+    inbox_tab, evaluation_tab, gmail_tab = st.tabs(["📥 Inbox", "📊 Evaluation", "📧 Gmail"])
     with inbox_tab:
         render_inbox_tab(repository)
     with evaluation_tab:
         render_evaluation_tab(repository)
+    with gmail_tab:
+        render_gmail_tab(repository)
 
 
 main()
