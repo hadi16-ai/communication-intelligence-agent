@@ -6,6 +6,7 @@ and app.streamlit_app / app.evaluation never import app.ai.
 """
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -17,7 +18,7 @@ from app.storage.repositories import EmailRepository
 from tests.test_evaluation_evaluator import gt
 from tests.test_models import make_classification, make_email
 
-APP_PATH = "app/streamlit_app.py"
+APP_PATH = str(Path(__file__).resolve().parent.parent / "app" / "streamlit_app.py")
 
 
 @pytest.fixture

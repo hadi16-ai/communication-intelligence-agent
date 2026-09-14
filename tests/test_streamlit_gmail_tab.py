@@ -6,6 +6,8 @@ GMAIL_TOKEN_PATH point at temp paths, and the Gmail-client/classifier
 construction functions are monkeypatched to fakes before any button click.
 """
 
+from pathlib import Path
+
 import pytest
 from streamlit.testing.v1 import AppTest
 
@@ -14,7 +16,7 @@ from tests.fakes import FakeClassifier
 from tests.test_gmail_client import FakeGmailClient, valid_message
 from tests.test_models import make_classification
 
-APP_PATH = "app/streamlit_app.py"
+APP_PATH = str(Path(__file__).resolve().parent.parent / "app" / "streamlit_app.py")
 
 
 @pytest.fixture
@@ -42,6 +44,15 @@ def connect(token_path):
     token_path.write_text("{}", encoding="utf-8")
 
 
+def fetch_button(at):
+    """The Gmail tab's "Fetch and process messages" button, found by
+    label rather than position — the Inbox tab's own empty-state "Load
+    demo emails" button also renders on the page (all tabs render every
+    script run) and would otherwise collide with a plain `at.button[0]`.
+    """
+    return next(b for b in at.button if "Fetch and process" in b.label)
+
+
 class TestNotConnected:
     def test_shows_connect_instructions_when_no_token(self, db_path, token_path):
         at = run_app()
@@ -53,12 +64,38 @@ class TestNotConnected:
     def test_no_fetch_button_when_not_connected(self, db_path, token_path):
         at = run_app()
 
-        assert len(at.button) == 0
+        assert not any("Fetch and process" in b.label for b in at.button)
 
     def test_readonly_notice_always_shown(self, db_path, token_path):
         at = run_app()
 
         assert any("Read-only Gmail access" in i.value for i in at.info)
+
+
+class TestGmailTokenFromSecret:
+    def test_gmail_token_json_env_var_bootstraps_a_missing_token_file(self, db_path, token_path, monkeypatch):
+        """Deployment convenience: on a headless server there's no way to
+        run the interactive OAuth consent flow, so a token obtained
+        locally can instead be provided via a GMAIL_TOKEN_JSON secret.
+        """
+        assert not token_path.exists()
+        monkeypatch.setenv("GMAIL_TOKEN_JSON", '{"token": "fake", "refresh_token": "fake"}')
+
+        at = run_app()
+
+        assert len(at.exception) == 0
+        assert token_path.exists()
+        assert any("connected" in s.value.lower() for s in at.success)
+
+    def test_gmail_token_json_env_var_never_overwrites_an_existing_token(self, db_path, token_path, monkeypatch):
+        connect(token_path)
+        original = token_path.read_text(encoding="utf-8")
+        monkeypatch.setenv("GMAIL_TOKEN_JSON", '{"token": "should-not-be-written"}')
+
+        at = run_app()
+
+        assert len(at.exception) == 0
+        assert token_path.read_text(encoding="utf-8") == original
 
 
 class TestConnected:
@@ -87,7 +124,7 @@ class TestFetchAndProcess:
         monkeypatch.setattr("app.ai.classifier.get_classifier", lambda settings: fake_classifier)
 
         at = run_app()
-        at.button[0].click().run()
+        fetch_button(at).click().run()
 
         assert len(at.exception) == 0
         assert any("Fetched 2 message(s)" in s.value for s in at.success)
@@ -102,7 +139,7 @@ class TestFetchAndProcess:
         monkeypatch.setattr("app.ai.classifier.get_classifier", lambda settings: fake_classifier)
 
         at = run_app()
-        at.button[0].click().run()
+        fetch_button(at).click().run()
 
         values = {m.label: m.value for m in at.metric}
         assert values["Total processed"] == "1"
@@ -118,7 +155,7 @@ class TestFetchAndProcess:
         monkeypatch.setattr("app.gmail.client.GmailClient.from_token_file", raise_auth_error)
 
         at = run_app()
-        at.button[0].click().run()
+        fetch_button(at).click().run()
 
         assert len(at.exception) == 0
         assert any("Gmail authentication error" in e.value for e in at.error)
@@ -140,7 +177,7 @@ class TestFetchAndProcess:
         )
 
         at = run_app()
-        at.button[0].click().run()
+        fetch_button(at).click().run()
 
         assert len(at.exception) == 0
         assert any("Gmail API error" in e.value for e in at.error)
@@ -157,8 +194,8 @@ class TestFetchAndProcess:
         monkeypatch.setattr("app.ai.classifier.get_classifier", lambda settings: fake_classifier)
 
         at = run_app()
-        at.button[0].click().run()
-        at.button[0].click().run()
+        fetch_button(at).click().run()
+        fetch_button(at).click().run()
 
         assert fake_classifier.call_count == 1
 

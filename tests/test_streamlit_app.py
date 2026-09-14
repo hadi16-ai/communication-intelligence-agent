@@ -6,6 +6,7 @@ temporary file before the app runs.
 """
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -14,7 +15,7 @@ from app.core.models import Category, RiskFlag, UrgencyLevel
 from app.storage.repositories import EmailRepository
 from tests.test_models import make_classification, make_decision, make_email
 
-APP_PATH = "app/streamlit_app.py"
+APP_PATH = str(Path(__file__).resolve().parent.parent / "app" / "streamlit_app.py")
 
 
 @pytest.fixture

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.core.models import Category, Decision, DecisionSource, RiskFlag
+from app.core.models import Category, Decision, DecisionSource, RiskFlag, UrgencyLevel
 from app.storage.repositories import EmailRepository, StoredEmailRecord
 
 CATEGORY_EMOJI: dict[Category, str] = {
@@ -72,9 +72,13 @@ def filter_records(
     records: list[StoredEmailRecord],
     category: Category | None = None,
     search: str = "",
+    urgency: UrgencyLevel | None = None,
+    pending_only: bool = False,
 ) -> list[StoredEmailRecord]:
-    """Filters by final decision category (None = all categories) and an
-    optional case-insensitive substring search over sender + subject.
+    """Filters by final decision category (None = all categories), an
+    optional case-insensitive substring search over sender + subject, an
+    optional classification urgency, and/or "pending" (classified but not
+    yet decided).
 
     A record with no decision yet is excluded by any specific category
     filter (it belongs to none of the four categories) but is always
@@ -83,11 +87,36 @@ def filter_records(
     result = records
     if category is not None:
         result = [r for r in result if r.decision is not None and r.decision.category == category]
+    if urgency is not None:
+        result = [r for r in result if r.classification.urgency == urgency]
+    if pending_only:
+        result = [r for r in result if r.decision is None]
     if search:
         needle = search.strip().lower()
         if needle:
             result = [r for r in result if needle in r.sender.lower() or needle in r.subject.lower()]
     return result
+
+
+def urgency_breakdown(records: list[StoredEmailRecord]) -> dict[UrgencyLevel, int]:
+    """How many stored records fall into each urgency level, in a fixed
+    LOW/MEDIUM/HIGH order regardless of which levels are actually present.
+    """
+    counts = {level: 0 for level in UrgencyLevel}
+    for record in records:
+        counts[record.classification.urgency] += 1
+    return counts
+
+
+def recent_activity(records: list[StoredEmailRecord], limit: int = 5) -> list[StoredEmailRecord]:
+    """The most recently processed records, most recent first.
+
+    `records` (from `EmailRepository.list_records()`) is already ordered
+    by `processed_at DESC`, so this is just a bounded slice — kept as a
+    named helper so the dashboard's intent ("recent activity") is explicit
+    rather than an inline `records[:5]`.
+    """
+    return records[:limit]
 
 
 def format_risk_flags(risk_flags: list[RiskFlag]) -> str:

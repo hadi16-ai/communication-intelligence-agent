@@ -27,3 +27,6 @@ env/
 Thumbs.db
 .vscode/
 .idea/
+
+# --- Session-local, not part of the project ---
+.claude/scheduled_tasks.lock

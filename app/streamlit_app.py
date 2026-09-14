@@ -17,14 +17,27 @@ Repository/SQLite -> this file (display, and the one Gmail sync action)
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    # `streamlit run app/streamlit_app.py` only guarantees this script's own
+    # directory (app/) is importable, not the repo root — so `import app...`
+    # below can fail with `ModuleNotFoundError: No module named 'app'`
+    # depending on how/where the process is launched (observed directly: it
+    # fails via a plain `streamlit run` invocation without a PYTHONPATH set,
+    # succeeds with one). Making the entrypoint self-sufficient here means
+    # it starts correctly regardless of the launcher/working directory.
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import streamlit as st
 
 from app.ai.classifier import ClassificationError, get_classifier
 from app.core.config import Settings
 from app.core.decisions import DecisionEngine
-from app.core.models import Category, DecisionSource
+from app.core.models import Category, DecisionSource, UrgencyLevel
 from app.evaluation.evaluator import EvaluationReport, evaluate
 from app.gmail.client import GmailAPIError, GmailAuthError, GmailClient
 from app.preferences.manager import PreferenceManager
@@ -36,9 +49,12 @@ from app.ui.dashboard_data import (
     filter_records,
     format_risk_flags,
     load_records,
+    recent_activity,
     summarize,
     to_table_row,
+    urgency_breakdown,
 )
+from app.ui.demo_data import DEFAULT_DEMO_COUNT, run_demo_batch
 from app.ui.evaluation_view import (
     category_metrics_rows,
     confusion_matrix_rows,
@@ -48,13 +64,59 @@ from app.ui.evaluation_view import (
 )
 from app.ui.gmail_view import format_sync_summary, gmail_is_connected, sync_gmail
 
+
+def _load_secrets_into_env() -> None:
+    """Bridges Streamlit Cloud's secrets manager into `os.environ` so the
+    existing `Settings` (pydantic-settings, env-var/`.env`-based) keeps
+    working unchanged on a deployment where there is no local `.env` file.
+
+    Local dev / tests are unaffected: `st.secrets` raises when no
+    secrets.toml exists anywhere, which is the normal local case, and that
+    is caught and ignored rather than surfaced as an error. Never logs or
+    displays secret values.
+    """
+    try:
+        for key, value in st.secrets.items():
+            os.environ.setdefault(str(key), str(value))
+    except Exception:
+        pass
+
+
+_load_secrets_into_env()
+
 st.set_page_config(
     page_title="Communication Intelligence Agent",
     page_icon="📬",
     layout="wide",
 )
 
-PREFERENCES_PATH = Path(__file__).resolve().parent.parent / "data" / "preferences.json"
+PREFERENCES_PATH = _REPO_ROOT / "data" / "preferences.json"
+
+
+def _bootstrap_gmail_token_from_secret(settings: Settings) -> None:
+    """Optional deployment convenience: the interactive OAuth consent flow
+    (scripts/authorize_gmail.py) cannot run on a headless server, so a
+    Cloud deployment has no way to produce credentials/token.json itself.
+
+    If a `GMAIL_TOKEN_JSON` secret/env var is set (the contents of a
+    token.json already obtained by running that script locally, on the
+    user's own machine, against their own Google account) and no token
+    file exists yet at `settings.gmail_token_path`, this writes it out
+    once. Grants no capability beyond what that already-obtained,
+    gmail.readonly-scoped token allows, and never overwrites an existing
+    token file. Never logs the token content.
+    """
+    token_json = os.environ.get("GMAIL_TOKEN_JSON")
+    if not token_json:
+        return
+    token_path = Path(settings.gmail_token_path)
+    if token_path.exists():
+        return
+    try:
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(token_json, encoding="utf-8")
+    except OSError:
+        pass  # best-effort convenience only; the Gmail tab reports "not connected" otherwise
 
 
 def _get_repository() -> EmailRepository:
@@ -96,7 +158,28 @@ def render_header() -> None:
     st.caption("Personalized email triage: Notify, Digest, Mute, or Quarantine.")
 
 
-def render_summary(summary) -> None:
+def render_sidebar(settings: Settings, records) -> None:
+    """A compact "about this app" panel: what it is, what model/DB it's
+    using, and the same read-only safety notice as the Gmail tab — visible
+    from anywhere in the app, not just the Gmail tab.
+    """
+    with st.sidebar:
+        st.subheader("📬 Communication Intelligence Agent")
+        st.caption("AI email triage: Notify · Digest · Mute · Quarantine.")
+        st.divider()
+        st.markdown("**Configuration**")
+        st.caption(f"Gemini model: `{settings.gemini_model}`")
+        st.caption(f"Database: `{settings.database_path}`")
+        if records:
+            st.caption(f"{len(records)} email(s) processed so far.")
+        st.divider()
+        st.info(
+            "🔒 Gmail access, when connected, is **read-only**. This app "
+            "never sends, deletes, archives, or labels anything."
+        )
+
+
+def render_summary(summary, records) -> None:
     columns = st.columns(5)
     columns[0].metric(f"{CATEGORY_EMOJI[Category.NOTIFY]} NOTIFY", summary.notify)
     columns[1].metric(f"{CATEGORY_EMOJI[Category.DIGEST]} DIGEST", summary.digest)
@@ -105,6 +188,11 @@ def render_summary(summary) -> None:
     columns[4].metric("Total processed", summary.total)
     if summary.pending:
         st.caption(f"{summary.pending} record(s) classified but not yet decided.")
+
+    urgency_counts = urgency_breakdown(records)
+    urgency_cols = st.columns(3)
+    for col, level in zip(urgency_cols, UrgencyLevel):
+        col.metric(f"Urgency: {level.value}", urgency_counts[level])
 
 
 def render_filters(records):
@@ -115,8 +203,12 @@ def render_filters(records):
         (f"{CATEGORY_EMOJI[Category.MUTE]} MUTE", Category.MUTE),
         (f"{CATEGORY_EMOJI[Category.QUARANTINE]} QUARANTINE", Category.QUARANTINE),
     ]
+    urgency_options: list[tuple[str, UrgencyLevel | None]] = [
+        ("Any urgency", None),
+        *[(level.value, level) for level in UrgencyLevel],
+    ]
 
-    filter_col, search_col = st.columns([1, 2])
+    filter_col, urgency_col, search_col = st.columns([1.2, 1, 1.5])
     with filter_col:
         label = st.radio(
             "Filter by decision",
@@ -124,10 +216,13 @@ def render_filters(records):
             horizontal=True,
         )
         selected_category = dict(filter_options)[label]
+    with urgency_col:
+        urgency_label = st.selectbox("Urgency", options=[opt[0] for opt in urgency_options])
+        selected_urgency = dict(urgency_options)[urgency_label]
     with search_col:
         search = st.text_input("Search sender or subject", value="")
 
-    return filter_records(records, category=selected_category, search=search)
+    return filter_records(records, category=selected_category, search=search, urgency=selected_urgency)
 
 
 def render_table(filtered_records) -> None:
@@ -198,20 +293,74 @@ def render_detail(filtered_records) -> None:
             st.caption(decision.reasoning)
 
 
+_DEMO_MESSAGE_KEY = "demo_load_message"
+
+
+def render_demo_loader(repository: EmailRepository) -> None:
+    """A one-click way to see the app working without Gmail: classifies a
+    handful of the existing shipped synthetic emails (data/eval_dataset.json,
+    already used for M9 evaluation) through the real, unmodified pipeline.
+    Safe to click more than once — already-classified demo emails are
+    served from the cache rather than re-sent to Gemini.
+    """
+    if _DEMO_MESSAGE_KEY in st.session_state:
+        kind, message = st.session_state.pop(_DEMO_MESSAGE_KEY)
+        getattr(st, kind)(message)
+
+    st.info(
+        "No processed emails yet. This dashboard only reads existing data — "
+        "it never calls Gemini automatically."
+    )
+    st.caption(
+        f"Try it now: classify {DEFAULT_DEMO_COUNT} sample emails with the real "
+        "AI pipeline, or connect Gmail in the 📧 tab."
+    )
+    if st.button("✨ Load demo emails"):
+        settings = Settings()
+        try:
+            with st.spinner("Classifying demo emails with Gemini..."):
+                processor = EmailProcessor(
+                    classifier=_get_pipeline_classifier(settings),
+                    preferences=_get_preferences(),
+                    decision_engine=DecisionEngine(),
+                    repository=repository,
+                )
+                results = run_demo_batch(processor)
+        except ClassificationError as exc:
+            st.session_state[_DEMO_MESSAGE_KEY] = ("error", f"Classifier error: {exc}")
+        else:
+            st.session_state[_DEMO_MESSAGE_KEY] = (
+                "success",
+                f"Processed {len(results)} demo email(s).",
+            )
+        st.rerun()
+
+
+def render_recent_activity(records) -> None:
+    st.subheader("Recent activity")
+    recent = recent_activity(records)
+    for record in recent:
+        decision = record.decision
+        label = decision.category.value if decision is not None else "PENDING"
+        emoji = CATEGORY_EMOJI.get(decision.category, "⏳") if decision is not None else "⏳"
+        st.caption(
+            f"{emoji} **{label}** — {record.subject or '(no subject)'} — {record.sender} "
+            f"({record.received_at.strftime('%Y-%m-%d %H:%M')})"
+        )
+
+
 def render_inbox_tab(repository: EmailRepository) -> None:
     records = load_records(repository)
 
     if not records:
-        st.info(
-            "No processed emails yet. This dashboard only reads existing data — "
-            "it never calls Gemini automatically. Run the pipeline "
-            "(see scripts/run_synthetic_pipeline.py or the M7 EmailProcessor) "
-            "to populate the database first."
-        )
+        render_demo_loader(repository)
         return
 
     summary = summarize(records)
-    render_summary(summary)
+    render_summary(summary, records)
+    st.divider()
+
+    render_recent_activity(records)
     st.divider()
 
     filtered_records = render_filters(records)
@@ -397,7 +546,11 @@ def render_gmail_tab(repository: EmailRepository) -> None:
 def main() -> None:
     render_header()
 
+    settings = Settings()
+    _bootstrap_gmail_token_from_secret(settings)
     repository = _get_repository()
+
+    render_sidebar(settings, load_records(repository))
 
     inbox_tab, evaluation_tab, gmail_tab = st.tabs(["📥 Inbox", "📊 Evaluation", "📧 Gmail"])
     with inbox_tab:
@@ -408,4 +561,17 @@ def main() -> None:
         render_gmail_tab(repository)
 
 
-main()
+try:
+    main()
+except Exception:
+    # Last-resort UI guard: never show a raw traceback (or any exception
+    # detail that could leak file paths/internals) on a page that may be
+    # publicly reachable. The full traceback still goes to stderr, which on
+    # a deployment lands in the platform's own (owner-only) app logs.
+    import traceback
+
+    traceback.print_exc()
+    st.error(
+        "Something went wrong while rendering the app. The error has been "
+        "logged; no internal details are shown here."
+    )

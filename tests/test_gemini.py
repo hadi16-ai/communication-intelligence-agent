@@ -260,7 +260,7 @@ class TestErrorHandling:
         with pytest.raises(ClassificationError):
             classifier.classify(make_email())
 
-        assert calls["count"] == 3  # stop_after_attempt(3)
+        assert calls["count"] == 4  # stop_after_attempt(4)
 
     def test_client_error_is_not_retried(self, monkeypatch):
         classifier = GeminiClassifier(make_settings())
@@ -276,3 +276,42 @@ class TestErrorHandling:
             classifier.classify(make_email())
 
         assert calls["count"] == 1
+
+    def test_rate_limit_429_is_retried_then_succeeds(self, monkeypatch):
+        """429 RESOURCE_EXHAUSTED is transient (a burst quota limit), so it
+        gets the same retry-with-backoff treatment as a 5xx ServerError —
+        observed directly against the real Gemini API (concurrent bursts
+        hit this exact error) rather than assumed.
+        """
+        monkeypatch.setattr(time, "sleep", lambda seconds: None)
+        classifier = GeminiClassifier(make_settings())
+        calls = {"count": 0}
+
+        def flaky_generate_content(**kwargs):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                raise ClientError(429, {"message": "quota exceeded"})
+            return FakeResponse(valid_payload_json())
+
+        patch_generate_content(monkeypatch, classifier, flaky_generate_content)
+
+        result = classifier.classify(make_email())
+
+        assert calls["count"] == 3
+        assert result.category == Category.QUARANTINE
+
+    def test_persistent_429_raises_classification_error_after_retries(self, monkeypatch):
+        monkeypatch.setattr(time, "sleep", lambda seconds: None)
+        classifier = GeminiClassifier(make_settings())
+        calls = {"count": 0}
+
+        def always_exhausted(**kwargs):
+            calls["count"] += 1
+            raise ClientError(429, {"message": "quota exceeded"})
+
+        patch_generate_content(monkeypatch, classifier, always_exhausted)
+
+        with pytest.raises(ClassificationError):
+            classifier.classify(make_email())
+
+        assert calls["count"] == 4  # stop_after_attempt(4)

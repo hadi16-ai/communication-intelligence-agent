@@ -11,8 +11,8 @@ import json
 
 from google import genai
 from google.genai import types
-from google.genai.errors import ServerError
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from google.genai.errors import ClientError, ServerError
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.ai.classifier import BaseClassifier, ClassificationError
 from app.ai.prompts import CLASSIFICATION_SYSTEM_INSTRUCTION, build_classification_prompt
@@ -48,6 +48,18 @@ def _build_response_schema() -> dict:
         },
         "required": ["category", "urgency", "confidence", "summary", "reasoning"],
     }
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Transient failures worth a retry: any `ServerError` (5xx — model
+    overloaded/unavailable), plus specifically HTTP 429 `ClientError`
+    (RESOURCE_EXHAUSTED — rate/quota limit). Other `ClientError`s (bad
+    request, auth failure) are not transient and must propagate
+    immediately rather than waste retries on something retrying can't fix.
+    """
+    if isinstance(exc, ServerError):
+        return True
+    return isinstance(exc, ClientError) and getattr(exc, "code", None) == 429
 
 
 class GeminiClassifier(BaseClassifier):
@@ -95,14 +107,15 @@ class GeminiClassifier(BaseClassifier):
 
     @retry(
         reraise=True,
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type(ServerError),
+        stop=stop_after_attempt(4),
+        wait=wait_exponential(multiplier=2, min=2, max=30),
+        retry=retry_if_exception(_is_retryable),
     )
     def _generate_with_retry(self, email: EmailMessage):
-        """Only retries `ServerError` (transient 5xx failures). Client
-        errors (bad request, auth failures, etc.) are not transient and
-        are left to propagate immediately.
+        """Retries transient failures only — `ServerError` (5xx) and HTTP
+        429 `ClientError` (rate/quota limit) — with exponential backoff.
+        Any other client error (bad request, auth failure, etc.) is not
+        transient and is left to propagate immediately rather than retried.
         """
         return self._client.models.generate_content(
             model=self._model,

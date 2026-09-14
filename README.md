@@ -18,7 +18,18 @@ thing as dangerous.
 
 ## Status
 
-**Version 1 (Intelligence Core) — in progress.**
+**Version 1 (Intelligence Core) — complete. Version 2 (usable product + deployment) — complete.**
+
+Version 2 keeps every V1 architectural boundary unchanged (classification vs.
+decision, read-only Gmail, no raw body storage) and adds: a one-click demo
+data loader (classifies a handful of the shipped synthetic emails so the
+dashboard isn't empty on first run, without needing Gmail), a sidebar with
+live configuration/status, an urgency filter and a "recent activity" view,
+retry-with-backoff on Gemini 429 (rate/quota) responses in addition to the
+existing 5xx retry, a global UI crash guard, and a deployment configuration
+(`.streamlit/config.toml`, a `secrets.toml` bridge into `Settings`, and a
+`GMAIL_TOKEN_JSON` convenience for connecting Gmail on a headless deployment
+— see "Deployment" below).
 
 Build order: synthetic emails → understand → classify → personalize →
 decide → store → display → evaluate → *then* connect Gmail. See the
@@ -302,6 +313,34 @@ only. A future V2 may add carefully scoped, explicitly-confirmed safe
 actions (e.g. archiving a MUTE-decided email) — but that requires a
 broader OAuth scope, new confirmation UX, and is out of scope here by
 design, not by oversight.
+
+## Deployment (Streamlit Community Cloud)
+
+The app is deployed as-is, straight from this repo — no code differs
+between local and deployed runs.
+
+1. Push this repo to GitHub (already done for the tracked `origin` remote).
+2. On [share.streamlit.io](https://share.streamlit.io), create a new app
+   pointing at this repo, branch `master`, entrypoint `app/streamlit_app.py`.
+3. In the app's **Settings → Secrets**, paste the contents of
+   [.streamlit/secrets.toml.example](.streamlit/secrets.toml.example) filled
+   in with your real values (at minimum `GEMINI_API_KEY`). `app/streamlit_app.py`
+   bridges these into environment variables at startup, so the existing
+   `Settings` class picks them up exactly as it would a local `.env`.
+4. Deploy. The Inbox tab starts empty — click **"✨ Load demo emails"** to
+   see real Gemini classifications immediately without connecting Gmail.
+
+**Known deployment limitations:**
+- Streamlit Community Cloud's filesystem is **ephemeral** — `data/app.db`
+  resets on every redeploy/restart. Fine for a demo; not durable storage.
+- Gmail's OAuth consent flow (`scripts/authorize_gmail.py`) opens a local
+  browser window and cannot run on a headless server. To use the Gmail tab
+  on a deployment, run that script locally once (signing into your own
+  Google account, `gmail.readonly` scope only), then paste the resulting
+  `credentials/token.json` file's contents into the `GMAIL_TOKEN_JSON`
+  secret — the app writes it out on startup if no token file exists yet.
+  Without this, the Gmail tab simply shows "not connected," same as a
+  fresh local checkout.
 
 ## Setup
 
