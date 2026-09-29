@@ -21,6 +21,9 @@ from app.core.decisions import DecisionEngine
 from app.core.models import ClassificationResult, Decision, EmailMessage
 from app.preferences.manager import PreferenceManager
 from app.storage.repositories import EmailRepository
+from app.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class ClassificationSource(str, Enum):
@@ -76,6 +79,8 @@ class EmailProcessor:
         decision = self._decision_engine.decide(email, classification, self._preferences)
         self._repository.save_decision(decision)
 
+        self._log_processed(email, classification, decision, source)
+
         return ProcessingResult(decision=decision, classification_source=source)
 
     def _get_or_create_classification(
@@ -86,8 +91,38 @@ class EmailProcessor:
             return cached, ClassificationSource.CACHE
 
         classification = self._classifier.classify(email)
-        self._repository.save_classification(email, classification)
+        metrics = self._classifier.last_call_metrics
+        self._repository.save_classification(email, classification, metrics=metrics)
         return classification, ClassificationSource.CLASSIFIER
+
+    def _log_processed(
+        self,
+        email: EmailMessage,
+        classification: ClassificationResult,
+        decision: Decision,
+        source: ClassificationSource,
+    ) -> None:
+        """One INFO line per processed email — message_id, category,
+        decision, source, and latency only. Never subject/sender/body:
+        this app's privacy claim rests on never persisting content, and
+        that must hold for logs too, not just storage.
+
+        Latency is only meaningful for a fresh classifier call
+        (`ClassificationSource.CLASSIFIER`) — on a cache hit, no call was
+        made this time, so `last_call_metrics` (if any) would be stale
+        data left over from a previous, different email and must not be
+        logged as if it described this one.
+        """
+        if source == ClassificationSource.CLASSIFIER:
+            metrics = self._classifier.last_call_metrics
+            latency_str = f"{metrics.latency_ms:.1f}" if metrics else "n/a"
+        else:
+            latency_str = "cached"
+        logger.info(
+            "processed message_id=%s classification=%s decision=%s source=%s latency_ms=%s",
+            email.message_id, classification.category.value, decision.category.value,
+            source.value, latency_str,
+        )
 
 
 def run_batch(processor: EmailProcessor, emails: list[EmailMessage]) -> list[ProcessingResult]:

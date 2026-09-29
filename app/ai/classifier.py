@@ -13,7 +13,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from app.core.config import Settings
-from app.core.models import ClassificationResult, EmailMessage
+from app.core.models import CallMetrics, ClassificationResult, EmailMessage
 
 
 class ClassificationError(RuntimeError):
@@ -38,15 +38,43 @@ class BaseClassifier(ABC):
     def classify(self, email: EmailMessage) -> ClassificationResult:
         raise NotImplementedError
 
+    @property
+    def last_call_metrics(self) -> CallMetrics | None:
+        """Observability metrics for the most recent `classify()` call, if
+        this implementation tracks them — `None` by default (e.g. test
+        fakes), which callers must treat as "no data," never as zero
+        cost/latency. Set even when `classify()` raises, so a caller can
+        inspect latency/retry_count/error_type after catching
+        `ClassificationError`.
+        """
+        return None
+
 
 def get_classifier(settings: Settings | None = None) -> BaseClassifier:
-    """Factory returning the configured classifier implementation.
+    """Factory returning the configured classifier implementation,
+    selected by `Settings.ai_provider` ("gemini" or "anthropic" —
+    defaults to "anthropic").
 
     Accepts an explicit `settings` for testability; defaults to reading
-    the real environment/.env otherwise. Imports GeminiClassifier lazily
-    so that code depending only on BaseClassifier (e.g. the decision
-    engine, most tests) never needs the google-genai package installed.
+    the real environment/.env otherwise. Imports each provider's module
+    lazily, and only the one actually selected, so code depending only on
+    BaseClassifier (e.g. the decision engine, most tests) never needs
+    either google-genai or anthropic installed, and selecting one
+    provider never requires the other provider's SDK to be present.
     """
-    from app.ai.gemini import GeminiClassifier
+    settings = settings or Settings()
+    provider = settings.ai_provider.lower()
 
-    return GeminiClassifier(settings or Settings())
+    if provider == "gemini":
+        from app.ai.gemini import GeminiClassifier
+
+        return GeminiClassifier(settings)
+
+    if provider == "anthropic":
+        from app.ai.anthropic_classifier import AnthropicClassifier
+
+        return AnthropicClassifier(settings)
+
+    raise ClassificationError(
+        f"Unknown AI_PROVIDER {provider!r}; expected 'gemini' or 'anthropic'."
+    )

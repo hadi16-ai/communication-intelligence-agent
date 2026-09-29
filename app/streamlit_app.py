@@ -168,7 +168,8 @@ def render_sidebar(settings: Settings, records) -> None:
         st.caption("AI email triage: Notify · Digest · Mute · Quarantine.")
         st.divider()
         st.markdown("**Configuration**")
-        st.caption(f"Gemini model: `{settings.gemini_model}`")
+        active_model = settings.anthropic_model if settings.ai_provider.lower() == "anthropic" else settings.gemini_model
+        st.caption(f"AI provider: `{settings.ai_provider}` (`{active_model}`)")
         st.caption(f"Database: `{settings.database_path}`")
         if records:
             st.caption(f"{len(records)} email(s) processed so far.")

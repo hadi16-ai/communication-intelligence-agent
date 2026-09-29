@@ -111,3 +111,30 @@ class Decision(BaseModel):
                 "Decision.message_id must match classification.message_id"
             )
         return self
+
+
+class CallMetrics(BaseModel):
+    """Observability metrics for one classifier API call — timing, token
+    usage, estimated cost, and retry behavior.
+
+    Deliberately a separate model from `ClassificationResult`: that model
+    is a claim about what the email IS; this one is data about the call
+    itself, and the two must never be conflated (e.g. stored cost/latency
+    should never influence a decision).
+
+    `input_tokens`/`output_tokens`/`cost_usd` are `None` when a classifier
+    implementation doesn't report them (e.g. a test fake) — never
+    fabricated as `0`, which would misleadingly read as "free." When
+    present, `output_tokens` includes any "thinking"/reasoning tokens a
+    model bills as output even though they never appear in the visible
+    response text (see app/ai/gemini.py's token-extraction logic, which
+    was written against a real inspected API response rather than assumed
+    field names).
+    """
+
+    latency_ms: float = Field(..., ge=0.0)
+    retry_count: int = Field(..., ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    cost_usd: float | None = Field(default=None, ge=0.0)
+    error_type: str | None = None

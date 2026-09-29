@@ -58,16 +58,79 @@ def test_subclass_implementing_classify_can_be_used_polymorphically():
     assert result.category == Category.DIGEST
 
 
-def test_get_classifier_without_api_key_raises_classification_error():
-    settings = Settings(_env_file=None, gemini_api_key=None)
+class TestProviderRouting:
+    """get_classifier() routes on Settings.ai_provider — "gemini" or
+    "anthropic" (default) — and each provider's own missing-key check
+    fires independently of the other provider's configuration.
+    """
 
-    with pytest.raises(ClassificationError):
-        get_classifier(settings)
+    def test_default_provider_is_anthropic(self):
+        settings = Settings(_env_file=None)
+        assert settings.ai_provider == "anthropic"
 
+    def test_anthropic_without_api_key_raises_classification_error(self):
+        settings = Settings(_env_file=None, ai_provider="anthropic", anthropic_api_key=None)
 
-def test_get_classifier_with_api_key_returns_a_base_classifier():
-    settings = Settings(_env_file=None, gemini_api_key="fake-test-key-not-real")
+        with pytest.raises(ClassificationError):
+            get_classifier(settings)
 
-    classifier = get_classifier(settings)
+    def test_anthropic_with_api_key_returns_a_base_classifier(self):
+        settings = Settings(
+            _env_file=None, ai_provider="anthropic", anthropic_api_key="fake-test-key-not-real"
+        )
 
-    assert isinstance(classifier, BaseClassifier)
+        classifier = get_classifier(settings)
+
+        assert isinstance(classifier, BaseClassifier)
+
+    def test_gemini_without_api_key_raises_classification_error(self):
+        settings = Settings(_env_file=None, ai_provider="gemini", gemini_api_key=None)
+
+        with pytest.raises(ClassificationError):
+            get_classifier(settings)
+
+    def test_gemini_with_api_key_returns_a_base_classifier(self):
+        settings = Settings(_env_file=None, ai_provider="gemini", gemini_api_key="fake-test-key-not-real")
+
+        classifier = get_classifier(settings)
+
+        assert isinstance(classifier, BaseClassifier)
+
+    def test_anthropic_selection_does_not_require_a_gemini_key(self):
+        """Selecting one provider must never require the other provider's
+        credentials — that would defeat the point of the two being
+        independently selectable.
+        """
+        settings = Settings(
+            _env_file=None, ai_provider="anthropic",
+            anthropic_api_key="fake-test-key-not-real", gemini_api_key=None,
+        )
+
+        classifier = get_classifier(settings)
+
+        assert isinstance(classifier, BaseClassifier)
+
+    def test_gemini_selection_does_not_require_an_anthropic_key(self):
+        settings = Settings(
+            _env_file=None, ai_provider="gemini",
+            gemini_api_key="fake-test-key-not-real", anthropic_api_key=None,
+        )
+
+        classifier = get_classifier(settings)
+
+        assert isinstance(classifier, BaseClassifier)
+
+    def test_unknown_provider_raises_classification_error(self):
+        settings = Settings(_env_file=None, ai_provider="not-a-real-provider")
+
+        with pytest.raises(ClassificationError):
+            get_classifier(settings)
+
+    def test_provider_matching_is_case_insensitive(self):
+        settings = Settings(
+            _env_file=None, ai_provider="ANTHROPIC", anthropic_api_key="fake-test-key-not-real"
+        )
+
+        classifier = get_classifier(settings)
+
+        assert isinstance(classifier, BaseClassifier)

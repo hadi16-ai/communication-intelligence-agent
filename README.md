@@ -86,12 +86,23 @@ data/eval_dataset.json (ground truth) + app/storage (stored results)
 ```
 
 The AI layer sits behind a small interface (`app/ai/classifier.py`) so the
-LLM provider can change without touching the rest of the application. The
-default model is configured, not hard-coded:
+LLM provider can change without touching the rest of the application. Two
+providers exist side by side and are selected via `AI_PROVIDER`
+(`anthropic` — the default — or `gemini`); only the selected provider's
+API key is required:
 
 ```
-DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview"   # overridable via GEMINI_MODEL
+DEFAULT_AI_PROVIDER = "anthropic"                        # overridable via AI_PROVIDER
+DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"     # overridable via ANTHROPIC_MODEL
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"                 # overridable via GEMINI_MODEL
 ```
+
+Both classifiers share the same injection-hardened prompt text
+(`app/ai/prompts.py`) and the same `ClassificationResult.model_validate()`
+step — there is exactly one place either provider's output gets validated
+against the domain schema, not two parallel ones. `AnthropicClassifier`
+uses Claude's forced tool-use (`tool_choice`) for structured output;
+`GeminiClassifier` uses Gemini's `response_schema`.
 
 ## Project structure
 
@@ -99,17 +110,18 @@ DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview"   # overridable via GEMINI_MODEL
 app/
     streamlit_app.py       # dashboard entry point: Inbox + Evaluation tabs (M8/M9)
     core/
-        config.py          # settings, incl. GEMINI_MODEL (M1)
-        models.py          # Category enum, EmailMessage, ClassificationResult, Decision (M1)
+        config.py          # settings, incl. AI_PROVIDER/GEMINI_MODEL/ANTHROPIC_MODEL (M1)
+        models.py          # Category enum, EmailMessage, ClassificationResult, Decision, CallMetrics (M1)
         decisions.py        # deterministic preference-override logic (M5)
         pipeline.py          # cache-lookup -> CLASSIFY -> DECIDE -> STORE orchestration (M7)
     gmail/
         client.py          # read-only Gmail API client + fetch_recent_messages (M10)
         parser.py          # raw Gmail message -> EmailMessage, MIME/HTML handling (M10)
     ai/
-        classifier.py      # BaseClassifier interface + factory (M4)
-        gemini.py           # Gemini implementation (M4)
-        prompts.py          # prompt templates (M4)
+        classifier.py           # BaseClassifier interface + provider-routing factory (M4)
+        gemini.py                # Gemini implementation
+        anthropic_classifier.py  # Claude implementation (default provider)
+        prompts.py               # shared prompt templates (both providers)
     preferences/
         manager.py         # structured preference loading + matching (M2)
     storage/
@@ -324,11 +336,13 @@ between local and deployed runs.
    pointing at this repo, branch `master`, entrypoint `app/streamlit_app.py`.
 3. In the app's **Settings → Secrets**, paste the contents of
    [.streamlit/secrets.toml.example](.streamlit/secrets.toml.example) filled
-   in with your real values (at minimum `GEMINI_API_KEY`). `app/streamlit_app.py`
-   bridges these into environment variables at startup, so the existing
-   `Settings` class picks them up exactly as it would a local `.env`.
+   in with your real values (at minimum `ANTHROPIC_API_KEY` — the default
+   provider — or `GEMINI_API_KEY` if you set `AI_PROVIDER=gemini`).
+   `app/streamlit_app.py` bridges these into environment variables at
+   startup, so the existing `Settings` class picks them up exactly as it
+   would a local `.env`.
 4. Deploy. The Inbox tab starts empty — click **"✨ Load demo emails"** to
-   see real Gemini classifications immediately without connecting Gmail.
+   see real classifications immediately without connecting Gmail.
 
 **Known deployment limitations:**
 - Streamlit Community Cloud's filesystem is **ephemeral** — `data/app.db`
@@ -353,9 +367,11 @@ venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and fill in `GEMINI_API_KEY` (see
-[Google AI Studio](https://aistudio.google.com/)). `.env` is gitignored —
-never commit it.
+Copy `.env.example` to `.env` and fill in `ANTHROPIC_API_KEY` (see
+[console.anthropic.com](https://console.anthropic.com/) — this is the
+default `AI_PROVIDER`), or set `AI_PROVIDER=gemini` and fill in
+`GEMINI_API_KEY` instead (see [Google AI Studio](https://aistudio.google.com/)).
+`.env` is gitignored — never commit it.
 
 For Gmail access, see "V1 Gmail Integration" above (optional — the
 dashboard, evaluation, and synthetic-dataset pipeline all work without it).

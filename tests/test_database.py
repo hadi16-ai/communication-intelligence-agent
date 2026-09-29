@@ -116,6 +116,94 @@ def test_connection_closes_even_if_the_caller_raises(tmp_path):
         captured_conn.execute("SELECT 1")
 
 
+def test_observability_columns_exist_on_a_freshly_created_database(tmp_path):
+    db_path = tmp_path / "fresh_observability.db"
+    initialize_database(db_path)
+
+    with get_connection(db_path) as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(email_records)")}
+
+    for column in ("latency_ms", "input_tokens", "output_tokens", "cost_usd", "retry_count", "error_type"):
+        assert column in columns
+
+
+def test_migration_adds_observability_columns_to_a_pre_part1_database(tmp_path):
+    """A database created before Part 1's instrumentation existed has
+    none of the new columns. initialize_database() must retrofit them —
+    additively, without dropping the table or losing existing rows —
+    the same "safe to call on an existing local DB" guarantee the schema
+    has always had.
+    """
+    db_path = tmp_path / "pre_existing.db"
+    old_schema = """
+    CREATE TABLE email_records (
+        message_id                 TEXT PRIMARY KEY,
+        sender                      TEXT NOT NULL,
+        subject                     TEXT NOT NULL,
+        email_timestamp             TEXT NOT NULL,
+        classification_category     TEXT NOT NULL,
+        classification_urgency      TEXT NOT NULL,
+        classification_confidence   REAL NOT NULL,
+        classification_risk_flags   TEXT NOT NULL,
+        classification_summary      TEXT NOT NULL,
+        classification_reasoning    TEXT NOT NULL,
+        decision_category            TEXT,
+        decision_source               TEXT,
+        decision_reasoning            TEXT,
+        processed_at                  TEXT NOT NULL,
+        decided_at                    TEXT
+    );
+    """
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(old_schema)
+    conn.execute(
+        """
+        INSERT INTO email_records (
+            message_id, sender, subject, email_timestamp,
+            classification_category, classification_urgency,
+            classification_confidence, classification_risk_flags,
+            classification_summary, classification_reasoning, processed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "pre-existing-msg", "a@example.com", "Subject", "2026-01-01T00:00:00+00:00",
+            "DIGEST", "LOW", 0.5, "[]", "summary", "reasoning", "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    initialize_database(db_path)  # migration under test
+
+    with get_connection(db_path) as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(email_records)")}
+        row = conn.execute(
+            "SELECT * FROM email_records WHERE message_id = ?", ("pre-existing-msg",)
+        ).fetchone()
+
+    for column in ("latency_ms", "input_tokens", "output_tokens", "cost_usd", "retry_count", "error_type"):
+        assert column in columns
+    # the pre-existing row survives, with NULLs for the new columns rather
+    # than being dropped or fabricated
+    assert row["sender"] == "a@example.com"
+    assert row["latency_ms"] is None
+    assert row["retry_count"] is None
+
+
+def test_migration_is_a_no_op_when_columns_already_exist(tmp_path):
+    """Calling initialize_database twice on an already-migrated database
+    must not error (e.g. from a naive "ADD COLUMN" without checking first).
+    """
+    db_path = tmp_path / "already_migrated.db"
+    initialize_database(db_path)
+
+    initialize_database(db_path)  # must not raise "duplicate column name"
+
+    with get_connection(db_path) as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(email_records)")}
+    assert "latency_ms" in columns
+
+
 def test_persists_across_separate_connections(tmp_path):
     """Simulates closing and reopening the database (e.g. across process
     runs): data written in one connection must be visible in another.

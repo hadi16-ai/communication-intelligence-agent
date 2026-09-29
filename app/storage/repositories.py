@@ -17,6 +17,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from app.core.models import (
+    CallMetrics,
     Category,
     ClassificationResult,
     Decision,
@@ -63,12 +64,22 @@ class EmailRepository:
         """Create the database/schema if needed. Idempotent."""
         initialize_database(self._db_path)
 
-    def save_classification(self, email: EmailMessage, classification: ClassificationResult) -> None:
+    def save_classification(
+        self,
+        email: EmailMessage,
+        classification: ClassificationResult,
+        metrics: CallMetrics | None = None,
+    ) -> None:
         """Insert or update the row for this email's classification.
 
         Deliberately does not touch any existing decision columns — a
         decision already stored for this message_id survives a
         re-classification.
+
+        `metrics` (Part 1 observability: latency/tokens/cost/retry_count)
+        is optional and stored alongside the classification when given —
+        `None` (e.g. a test fake classifier, or callers that don't track
+        it) writes NULL for those columns rather than fabricating zeros.
         """
         if classification.message_id != email.message_id:
             raise ValueError(
@@ -87,8 +98,9 @@ class EmailRepository:
                     classification_category, classification_urgency,
                     classification_confidence, classification_risk_flags,
                     classification_summary, classification_reasoning,
-                    processed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    processed_at,
+                    latency_ms, input_tokens, output_tokens, cost_usd, retry_count, error_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(message_id) DO UPDATE SET
                     sender = excluded.sender,
                     subject = excluded.subject,
@@ -99,7 +111,13 @@ class EmailRepository:
                     classification_risk_flags = excluded.classification_risk_flags,
                     classification_summary = excluded.classification_summary,
                     classification_reasoning = excluded.classification_reasoning,
-                    processed_at = excluded.processed_at
+                    processed_at = excluded.processed_at,
+                    latency_ms = excluded.latency_ms,
+                    input_tokens = excluded.input_tokens,
+                    output_tokens = excluded.output_tokens,
+                    cost_usd = excluded.cost_usd,
+                    retry_count = excluded.retry_count,
+                    error_type = excluded.error_type
                 """,
                 (
                     email.message_id,
@@ -113,6 +131,12 @@ class EmailRepository:
                     classification.summary,
                     classification.reasoning,
                     processed_at,
+                    metrics.latency_ms if metrics else None,
+                    metrics.input_tokens if metrics else None,
+                    metrics.output_tokens if metrics else None,
+                    metrics.cost_usd if metrics else None,
+                    metrics.retry_count if metrics else None,
+                    metrics.error_type if metrics else None,
                 ),
             )
             conn.commit()
@@ -206,6 +230,35 @@ class EmailRepository:
         with get_connection(self._db_path) as conn:
             rows = conn.execute("SELECT * FROM email_records ORDER BY processed_at DESC").fetchall()
         return [self._row_to_stored_record(row) for row in rows]
+
+    def list_call_metrics(self) -> list[CallMetrics]:
+        """Observability metrics (Part 1) for every stored row that
+        actually has them.
+
+        Rows saved before this instrumentation existed (or via a
+        classifier that doesn't report metrics) have `latency_ms IS
+        NULL` and are excluded here rather than fabricated as zero-cost —
+        callers aggregating these (e.g. an evaluation report's mean
+        latency/total cost) are implicitly aggregating only over
+        instrumented calls, which should be noted alongside any such
+        aggregate.
+        """
+        with get_connection(self._db_path) as conn:
+            rows = conn.execute(
+                "SELECT latency_ms, input_tokens, output_tokens, cost_usd, retry_count, error_type "
+                "FROM email_records WHERE latency_ms IS NOT NULL"
+            ).fetchall()
+        return [
+            CallMetrics(
+                latency_ms=row["latency_ms"],
+                retry_count=row["retry_count"] or 0,
+                input_tokens=row["input_tokens"],
+                output_tokens=row["output_tokens"],
+                cost_usd=row["cost_usd"],
+                error_type=row["error_type"],
+            )
+            for row in rows
+        ]
 
     def _row_to_stored_record(self, row) -> StoredEmailRecord:
         try:

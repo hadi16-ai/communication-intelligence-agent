@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.models import (
+    CallMetrics,
     Category,
     ClassificationResult,
     Decision,
@@ -210,3 +211,45 @@ class TestDecision:
         decision = make_decision()
         restored = Decision.model_validate_json(decision.model_dump_json())
         assert restored == decision
+
+
+# --- CallMetrics -----------------------------------------------------------
+
+
+class TestCallMetrics:
+    def test_valid_construction_with_full_data(self):
+        metrics = CallMetrics(
+            latency_ms=1234.5,
+            retry_count=1,
+            input_tokens=100,
+            output_tokens=250,
+            cost_usd=0.00085,
+        )
+        assert metrics.latency_ms == 1234.5
+        assert metrics.retry_count == 1
+        assert metrics.error_type is None
+
+    def test_optional_fields_default_to_none_not_zero(self):
+        """A classifier that doesn't report token/cost data must produce
+        None, never a fabricated 0 — 0 would misleadingly read as "free."
+        """
+        metrics = CallMetrics(latency_ms=10.0, retry_count=0)
+        assert metrics.input_tokens is None
+        assert metrics.output_tokens is None
+        assert metrics.cost_usd is None
+        assert metrics.error_type is None
+
+    def test_failure_metrics_carry_an_error_type(self):
+        metrics = CallMetrics(latency_ms=500.0, retry_count=3, error_type="ClientError")
+        assert metrics.error_type == "ClientError"
+
+    @pytest.mark.parametrize("field", ["latency_ms", "retry_count", "input_tokens", "output_tokens", "cost_usd"])
+    def test_negative_values_rejected(self, field):
+        base = dict(latency_ms=10.0, retry_count=0, input_tokens=5, output_tokens=5, cost_usd=0.01)
+        base[field] = -1
+        with pytest.raises(ValidationError):
+            CallMetrics(**base)
+
+    def test_missing_required_field_rejected(self):
+        with pytest.raises(ValidationError):
+            CallMetrics(retry_count=0)  # missing latency_ms

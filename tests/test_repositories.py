@@ -10,7 +10,7 @@ import sqlite3
 
 import pytest
 
-from app.core.models import Category, DecisionSource, RiskFlag, UrgencyLevel
+from app.core.models import CallMetrics, Category, DecisionSource, RiskFlag, UrgencyLevel
 from app.storage.database import get_connection
 from app.storage.repositories import EmailRepository, StorageError
 from tests.test_models import make_classification, make_decision, make_email
@@ -344,3 +344,91 @@ class TestIntegrityAndCorruption:
         with get_connection(repo._db_path) as conn:
             tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "email_records" in tables
+
+
+class TestObservabilityMetrics:
+    """Part 1: latency/token/cost/retry metrics stored alongside a
+    classification."""
+
+    def test_save_classification_without_metrics_stores_nulls(self, repo):
+        email = make_email(message_id="msg-no-metrics")
+        classification = make_classification(message_id="msg-no-metrics")
+
+        repo.save_classification(email, classification)  # no metrics= given
+
+        with get_connection(repo._db_path) as conn:
+            row = conn.execute(
+                "SELECT latency_ms, input_tokens, cost_usd, retry_count, error_type "
+                "FROM email_records WHERE message_id = ?",
+                ("msg-no-metrics",),
+            ).fetchone()
+        assert row["latency_ms"] is None
+        assert row["input_tokens"] is None
+        assert row["cost_usd"] is None
+        assert row["retry_count"] is None
+        assert row["error_type"] is None
+
+    def test_save_classification_with_metrics_persists_every_field(self, repo):
+        email = make_email(message_id="msg-with-metrics")
+        classification = make_classification(message_id="msg-with-metrics")
+        metrics = CallMetrics(
+            latency_ms=842.3, retry_count=2, input_tokens=310, output_tokens=97, cost_usd=0.000446,
+        )
+
+        repo.save_classification(email, classification, metrics=metrics)
+
+        with get_connection(repo._db_path) as conn:
+            row = conn.execute(
+                "SELECT latency_ms, input_tokens, output_tokens, cost_usd, retry_count, error_type "
+                "FROM email_records WHERE message_id = ?",
+                ("msg-with-metrics",),
+            ).fetchone()
+        assert row["latency_ms"] == 842.3
+        assert row["input_tokens"] == 310
+        assert row["output_tokens"] == 97
+        assert row["cost_usd"] == 0.000446
+        assert row["retry_count"] == 2
+        assert row["error_type"] is None
+
+    def test_list_call_metrics_excludes_rows_without_metrics(self, repo):
+        email_a = make_email(message_id="msg-a")
+        email_b = make_email(message_id="msg-b")
+        repo.save_classification(email_a, make_classification(message_id="msg-a"))  # no metrics
+        repo.save_classification(
+            email_b,
+            make_classification(message_id="msg-b"),
+            metrics=CallMetrics(latency_ms=100.0, retry_count=0, input_tokens=50, output_tokens=10, cost_usd=0.00004),
+        )
+
+        metrics = repo.list_call_metrics()
+
+        assert len(metrics) == 1
+        assert metrics[0].latency_ms == 100.0
+
+    def test_list_call_metrics_returns_empty_list_for_a_fresh_database(self, repo):
+        assert repo.list_call_metrics() == []
+
+    def test_reclassifying_updates_stored_metrics(self, repo):
+        """Re-saving a classification for the same message_id (e.g. a
+        second real classify() call after a cache miss race) must update
+        the observability columns too, not just the classification ones.
+        """
+        email = make_email(message_id="msg-reclassified")
+        repo.save_classification(
+            email, make_classification(message_id="msg-reclassified"),
+            metrics=CallMetrics(latency_ms=100.0, retry_count=1, error_type="ClientError"),
+        )
+
+        repo.save_classification(
+            email, make_classification(message_id="msg-reclassified"),
+            metrics=CallMetrics(latency_ms=200.0, retry_count=0),
+        )
+
+        with get_connection(repo._db_path) as conn:
+            row = conn.execute(
+                "SELECT latency_ms, retry_count, error_type FROM email_records WHERE message_id = ?",
+                ("msg-reclassified",),
+            ).fetchone()
+        assert row["latency_ms"] == 200.0
+        assert row["retry_count"] == 0
+        assert row["error_type"] is None

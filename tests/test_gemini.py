@@ -36,15 +36,29 @@ def make_settings(**overrides) -> Settings:
     defaults = dict(
         _env_file=None,
         gemini_api_key="fake-test-key-not-real",
-        gemini_model="gemini-3-flash-preview",
+        gemini_model="gemini-3.8-flash",
     )
     defaults.update(overrides)
     return Settings(**defaults)
 
 
+class FakeUsageMetadata:
+    """Mimics the real `GenerateContentResponseUsageMetadata` shape,
+    verified directly against a live API response (see app/ai/gemini.py's
+    `_extract_token_usage` docstring) — including `thoughts_token_count`,
+    which is billed as output but never appears in the visible text.
+    """
+
+    def __init__(self, prompt_token_count=0, candidates_token_count=0, thoughts_token_count=0):
+        self.prompt_token_count = prompt_token_count
+        self.candidates_token_count = candidates_token_count
+        self.thoughts_token_count = thoughts_token_count
+
+
 class FakeResponse:
-    def __init__(self, text):
+    def __init__(self, text, usage_metadata=None):
         self.text = text
+        self.usage_metadata = usage_metadata
 
 
 def valid_payload_json(**overrides) -> str:
@@ -84,7 +98,7 @@ class TestConstruction:
 
         assert captured["model"] == "gemini-experimental-x"
 
-    def test_default_model_is_gemini_3_flash_preview(self, monkeypatch):
+    def test_default_model_is_gemini_3_8_flash(self, monkeypatch):
         classifier = GeminiClassifier(make_settings())
         captured = {}
 
@@ -95,7 +109,7 @@ class TestConstruction:
         patch_generate_content(monkeypatch, classifier, fake_generate_content)
         classifier.classify(make_email())
 
-        assert captured["model"] == "gemini-3-flash-preview"
+        assert captured["model"] == "gemini-3.8-flash"
 
 
 class TestSuccessfulClassification:
@@ -315,3 +329,125 @@ class TestErrorHandling:
             classifier.classify(make_email())
 
         assert calls["count"] == 4  # stop_after_attempt(4)
+
+
+class TestObservabilityMetrics:
+    """Part 1: latency/token/cost/retry_count captured on last_call_metrics."""
+
+    def test_no_metrics_before_any_call(self):
+        classifier = GeminiClassifier(make_settings())
+        assert classifier.last_call_metrics is None
+
+    def test_successful_call_records_latency_and_zero_retries(self, monkeypatch):
+        classifier = GeminiClassifier(make_settings())
+        patch_generate_content(
+            monkeypatch, classifier,
+            lambda **kwargs: FakeResponse(valid_payload_json(), usage_metadata=FakeUsageMetadata()),
+        )
+
+        classifier.classify(make_email())
+
+        metrics = classifier.last_call_metrics
+        assert metrics is not None
+        assert metrics.latency_ms >= 0.0
+        assert metrics.retry_count == 0
+        assert metrics.error_type is None
+
+    def test_token_usage_includes_thinking_tokens_in_output(self, monkeypatch):
+        """output_tokens must be candidates_token_count + thoughts_token_count
+        — verified against a real response where thinking tokens (81) vastly
+        outnumbered the visible output tokens (4). Undercounting here would
+        substantially understate cost.
+        """
+        classifier = GeminiClassifier(make_settings())
+        usage = FakeUsageMetadata(prompt_token_count=9, candidates_token_count=4, thoughts_token_count=81)
+        patch_generate_content(
+            monkeypatch, classifier,
+            lambda **kwargs: FakeResponse(valid_payload_json(), usage_metadata=usage),
+        )
+
+        classifier.classify(make_email())
+
+        metrics = classifier.last_call_metrics
+        assert metrics.input_tokens == 9
+        assert metrics.output_tokens == 85  # 4 + 81, not just 4
+
+    def test_cost_usd_uses_gemini_3_8_flash_pricing(self, monkeypatch):
+        """$0.75/M input, $3.75/M output (introductory rate through
+        2026-12-31) — at exactly 1M tokens each the cost must be exactly
+        0.75 + 3.75 = 4.50, not a different model's rate.
+        """
+        classifier = GeminiClassifier(make_settings())
+        usage = FakeUsageMetadata(prompt_token_count=1_000_000, candidates_token_count=1_000_000, thoughts_token_count=0)
+        patch_generate_content(
+            monkeypatch, classifier,
+            lambda **kwargs: FakeResponse(valid_payload_json(), usage_metadata=usage),
+        )
+
+        classifier.classify(make_email())
+
+        assert classifier.last_call_metrics.cost_usd == pytest.approx(4.50)
+
+    def test_missing_usage_metadata_yields_none_not_zero(self, monkeypatch):
+        """If the SDK ever reports no usage data at all, tokens/cost must
+        be None (unknown), never fabricated as 0 (which reads as "free").
+        """
+        classifier = GeminiClassifier(make_settings())
+        patch_generate_content(
+            monkeypatch, classifier,
+            lambda **kwargs: FakeResponse(valid_payload_json(), usage_metadata=None),
+        )
+
+        classifier.classify(make_email())
+
+        metrics = classifier.last_call_metrics
+        assert metrics.input_tokens is None
+        assert metrics.output_tokens is None
+        assert metrics.cost_usd is None
+
+    def test_retry_count_reflects_actual_retries_on_eventual_success(self, monkeypatch):
+        monkeypatch.setattr(time, "sleep", lambda seconds: None)
+        classifier = GeminiClassifier(make_settings())
+        calls = {"count": 0}
+
+        def flaky(**kwargs):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                raise ServerError(503, {"message": "unavailable"})
+            return FakeResponse(valid_payload_json(), usage_metadata=FakeUsageMetadata())
+
+        patch_generate_content(monkeypatch, classifier, flaky)
+
+        classifier.classify(make_email())
+
+        assert classifier.last_call_metrics.retry_count == 2  # 3 attempts = 2 retries
+
+    def test_final_failure_records_error_type_and_retry_count(self, monkeypatch):
+        monkeypatch.setattr(time, "sleep", lambda seconds: None)
+        classifier = GeminiClassifier(make_settings())
+
+        def always_fails(**kwargs):
+            raise ServerError(503, {"message": "still down"})
+
+        patch_generate_content(monkeypatch, classifier, always_fails)
+
+        with pytest.raises(ClassificationError):
+            classifier.classify(make_email())
+
+        metrics = classifier.last_call_metrics
+        assert metrics is not None
+        assert metrics.error_type == "ServerError"
+        assert metrics.retry_count == 3  # 4 attempts = 3 retries
+        assert metrics.latency_ms >= 0.0
+
+    def test_non_retryable_failure_still_records_metrics(self, monkeypatch):
+        classifier = GeminiClassifier(make_settings())
+        patch_generate_content(monkeypatch, classifier, lambda **kwargs: FakeResponse(None))
+
+        with pytest.raises(ClassificationError):
+            classifier.classify(make_email())
+
+        metrics = classifier.last_call_metrics
+        assert metrics is not None
+        assert metrics.retry_count == 0
+        assert metrics.error_type == "ClassificationError"

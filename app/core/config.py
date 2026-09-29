@@ -8,7 +8,9 @@ real local .env file.
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_AI_PROVIDER = "anthropic"
 
 
 class Settings(BaseSettings):
@@ -25,9 +27,19 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    # Which classifier backend app.ai.classifier.get_classifier() builds —
+    # "gemini" or "anthropic". Both implementations always exist in the
+    # codebase; this only selects which one is active. See
+    # app/ai/classifier.py for the routing logic.
+    ai_provider: str = DEFAULT_AI_PROVIDER
+
     # Gemini
     gemini_api_key: SecretStr | None = None
     gemini_model: str = DEFAULT_GEMINI_MODEL
+
+    # Anthropic (Claude)
+    anthropic_api_key: SecretStr | None = None
+    anthropic_model: str = DEFAULT_ANTHROPIC_MODEL
 
     # Storage
     database_path: str = "data/app.db"

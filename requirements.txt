@@ -7,6 +7,10 @@ streamlit~=1.63.0
 # Gemini (current recommended SDK, not the deprecated google-generativeai)
 google-genai~=2.23.0
 
+# Claude — the default AI_PROVIDER (see app/core/config.py); the Gemini
+# path above stays installed too so both providers remain selectable.
+anthropic~=1.9.0
+
 # Gmail API + OAuth (read-only in Version 1)
 google-api-python-client~=2.200.0
 google-auth~=2.58.0

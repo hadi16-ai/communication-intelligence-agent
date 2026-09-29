@@ -6,6 +6,8 @@ database — no Gemini call, no network, no GEMINI_API_KEY, and no
 production database are ever touched here.
 """
 
+import logging
+
 import pytest
 
 from app.core.decisions import DecisionEngine
@@ -267,6 +269,85 @@ class TestConsistency:
 
 
 # --- Security --------------------------------------------------------------
+
+
+class TestObservabilityLogging:
+    """Part 1: one INFO log line per processed email, with no email content."""
+
+    def _capture(self):
+        """A handler attached directly to the app's logger namespace,
+        independent of pytest's caplog/root-logger propagation — our
+        logger deliberately sets propagate=False (app/utils/logging.py)
+        to avoid double-logging through Streamlit's/pytest's own root
+        logger, so a handler must be attached here to observe records.
+        """
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append
+        logger = logging.getLogger("communication_intelligence_agent")
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        return records, handler, logger
+
+    def test_info_logged_with_category_decision_and_latency_on_fresh_classification(self, repository, preferences):
+        records, handler, logger = self._capture()
+        try:
+            email = make_email(message_id="msg-1", sender="a@example.com", subject="Secret subject text")
+            classification = make_classification(message_id="msg-1", category=Category.NOTIFY, urgency=UrgencyLevel.HIGH)
+            classifier = FakeClassifier(classifications={"msg-1": classification})
+            processor = make_processor(repository, preferences, classifier)
+
+            processor.process(email)
+        finally:
+            logger.removeHandler(handler)
+
+        info_records = [r for r in records if r.levelno == logging.INFO]
+        assert len(info_records) == 1
+        message = info_records[0].getMessage()
+        assert "msg-1" in message
+        assert "NOTIFY" in message
+        assert "latency_ms" in message
+
+    def test_cache_hit_logs_cached_not_a_stale_latency_value(self, repository, preferences):
+        email = make_email(message_id="msg-1")
+        classification = make_classification(message_id="msg-1", category=Category.DIGEST, urgency=UrgencyLevel.LOW)
+        classifier = FakeClassifier(classifications={"msg-1": classification})
+        processor = make_processor(repository, preferences, classifier)
+        processor.process(email)  # first call: fresh classification
+
+        records, handler, logger = self._capture()
+        try:
+            processor.process(email)  # second call: cache hit
+        finally:
+            logger.removeHandler(handler)
+
+        info_records = [r for r in records if r.levelno == logging.INFO]
+        assert len(info_records) == 1
+        assert "latency_ms=cached" in info_records[0].getMessage()
+
+    def test_log_message_never_contains_sender_subject_or_body_text(self, repository, preferences):
+        """The whole point of this instrumentation is numeric/ID metrics
+        only — this directly guards the same privacy claim the app makes
+        about storage, extended to logs.
+        """
+        records, handler, logger = self._capture()
+        try:
+            email = make_email(
+                message_id="msg-1",
+                sender="very-identifiable-sender@example.com",
+                subject="UNIQUE_SUBJECT_MARKER_TEXT",
+            )
+            classification = make_classification(message_id="msg-1", category=Category.MUTE, urgency=UrgencyLevel.LOW)
+            classifier = FakeClassifier(classifications={"msg-1": classification})
+            processor = make_processor(repository, preferences, classifier)
+
+            processor.process(email)
+        finally:
+            logger.removeHandler(handler)
+
+        all_text = " ".join(r.getMessage() for r in records)
+        assert "very-identifiable-sender" not in all_text
+        assert "UNIQUE_SUBJECT_MARKER_TEXT" not in all_text
 
 
 class TestSecurity:

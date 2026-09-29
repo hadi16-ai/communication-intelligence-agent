@@ -1,4 +1,7 @@
-"""Prompt templates for the Gemini classifier.
+"""Prompt templates shared by every classifier implementation
+(app/ai/gemini.py, app/ai/anthropic_classifier.py) — provider-agnostic
+plain strings, reused as-is rather than duplicated per provider, so the
+defensive framing can't drift between them.
 
 The system instruction is the primary defense against prompt injection:
 email content is always presented to the model as untrusted, externally
