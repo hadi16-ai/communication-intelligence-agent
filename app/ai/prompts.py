@@ -34,7 +34,34 @@ characteristics, producing exactly these fields:
 - category: one of NOTIFY, DIGEST, MUTE, QUARANTINE — your best \
   understanding of what kind of message this is, from a careful, \
   security-aware reading. This is your own assessment, not a personalized \
-  decision for this specific user.
+  decision for this specific user. Use these definitions, not just the \
+  category names, to decide:
+  * NOTIFY — important enough that the recipient would want to be \
+    interrupted or made aware of it promptly (time-sensitive, personally \
+    consequential, or requires a timely response or decision).
+  * DIGEST — genuinely useful or relevant to the recipient, but not \
+    urgent: something they'd want to know eventually, batched with \
+    similar items for later reading (e.g. a non-urgent personal update, \
+    a community/event announcement, an informational notice).
+  * MUTE — low-value, repetitive, purely promotional, or otherwise not \
+    something the recipient needs to see as an individual item at all — \
+    not even later. The deciding question is not urgency but VALUE: does \
+    this email exist mainly to sell something, advertise a \
+    discount/promotion, or repeat a marketing message the recipient has \
+    likely already seen from this sender? If its only content is an \
+    offer, sale, or promotional pitch — with no substantive information \
+    the recipient specifically needs — that is MUTE, even though it is \
+    harmless and not urgent. Do not default this to DIGEST merely \
+    because it is calm in tone or not urgent: DIGEST is for content with \
+    real informational value the recipient would want to eventually \
+    read; MUTE is for content with essentially none, regardless of \
+    urgency. For example (illustrative only, not from any real message): \
+    an email whose entire content is "Flash sale — 30% off everything \
+    this weekend only, shop now" from a retailer is MUTE, not DIGEST — \
+    it carries a promotional offer and nothing else the recipient needs \
+    to know.
+  * QUARANTINE — suspicious, phishing, scam, or otherwise unsafe (see \
+    risk_flags below).
 - urgency: LOW, MEDIUM, or HIGH — how time-sensitive the email appears to \
   be based on its content.
 - confidence: your confidence in this classification, from 0.0 to 1.0.

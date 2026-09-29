@@ -75,9 +75,9 @@ def preferences() -> PreferenceManager:
 
 
 class TestSecurityQuarantine:
-    def test_phishing_risk_flag_forces_quarantine(self, engine, preferences):
+    def test_suspicious_link_risk_flag_forces_quarantine(self, engine, preferences):
         email = make_email(subject="Verify your account", body="Click here to verify your password.")
-        classification = make_classification(category=Category.NOTIFY, risk_flags=[RiskFlag.PHISHING])
+        classification = make_classification(category=Category.NOTIFY, risk_flags=[RiskFlag.SUSPICIOUS_LINK])
 
         decision = engine.decide(email, classification, preferences)
 
@@ -116,7 +116,7 @@ class TestSecurityQuarantine:
     def test_quarantine_overrides_protected_sender(self, engine, preferences):
         email = make_email(sender="manager@mycompany.com", subject="Security Alert - action required")
         classification = make_classification(
-            category=Category.NOTIFY, urgency=UrgencyLevel.HIGH, risk_flags=[RiskFlag.SPOOFED_SENDER]
+            category=Category.QUARANTINE, urgency=UrgencyLevel.HIGH, risk_flags=[RiskFlag.SPOOFED_SENDER]
         )
         assert preferences.is_protected_sender(email.sender) is True  # sanity check
 
@@ -154,6 +154,121 @@ class TestSecurityQuarantine:
             category=Category.QUARANTINE,
             urgency=UrgencyLevel.HIGH,
             risk_flags=[RiskFlag.PHISHING, RiskFlag.SPOOFED_SENDER],
+        )
+
+        decision = engine.decide(email, classification, preferences)
+
+        assert decision.category == Category.QUARANTINE
+
+
+# --- SECURITY: concrete vs. soft risk flags ---------------------------------
+
+
+class TestConcreteVsSoftRiskFlags:
+    """A real evaluation run (41 real Claude Haiku 4.5 classifications)
+    showed PHISHING/IMPERSONATION/SPOOFED_SENDER get applied by the
+    classifier as a hedge/caution signal even on emails it has already
+    correctly categorized as legitimate (two real examples: a genuine
+    bank security alert, and a routine account email from an
+    unfamiliar-looking domain) — not as a confident threat assessment.
+    Concrete-artifact flags (a real link, a scam pattern, malware, a
+    dangerous attachment) never appeared as false positives. This class
+    tests that distinction directly; see _CONCRETE_THREAT_FLAGS in
+    app/core/decisions.py for the full reasoning.
+    """
+
+    @pytest.mark.parametrize("soft_flag", [RiskFlag.PHISHING, RiskFlag.IMPERSONATION, RiskFlag.SPOOFED_SENDER])
+    def test_lone_soft_flag_with_notify_category_does_not_force_quarantine(self, engine, preferences, soft_flag):
+        """Mirrors the real false positives found in evaluation: the AI's
+        own category (NOTIFY) should stand when the only risk signal is a
+        soft/hedge flag, not a concrete artifact.
+        """
+        email = make_email(
+            sender="alerts@meridianbank.example.com",
+            subject="Security Alert: new sign-in to your account",
+            body="We noticed a new sign-in from a device we don't recognize. Contact us if this wasn't you.",
+        )
+        classification = make_classification(
+            category=Category.NOTIFY, urgency=UrgencyLevel.MEDIUM, risk_flags=[soft_flag]
+        )
+
+        decision = engine.decide(email, classification, preferences)
+
+        assert decision.category == Category.NOTIFY
+
+    @pytest.mark.parametrize("soft_flag", [RiskFlag.PHISHING, RiskFlag.IMPERSONATION, RiskFlag.SPOOFED_SENDER])
+    def test_multiple_soft_flags_together_still_do_not_force_quarantine(self, engine, preferences, soft_flag):
+        """Stacking soft flags must not add up to a concrete signal —
+        only a genuine RiskFlag.OTHER or artifact flag should.
+        """
+        classification = make_classification(
+            category=Category.NOTIFY,
+            urgency=UrgencyLevel.HIGH,
+            risk_flags=[RiskFlag.PHISHING, RiskFlag.IMPERSONATION, RiskFlag.SPOOFED_SENDER],
+        )
+        email = make_email(subject="Unusual transaction detected", body="Call us if you did not authorize this.")
+
+        decision = engine.decide(email, classification, preferences)
+
+        assert decision.category != Category.QUARANTINE
+
+    @pytest.mark.parametrize(
+        "concrete_flag",
+        [RiskFlag.SUSPICIOUS_LINK, RiskFlag.MALWARE_RISK, RiskFlag.SCAM, RiskFlag.SUSPICIOUS_ATTACHMENT, RiskFlag.OTHER],
+    )
+    def test_lone_concrete_flag_forces_quarantine_even_with_notify_category(self, engine, preferences, concrete_flag):
+        """A concrete artifact flag must still force QUARANTINE
+        unconditionally, even if the AI's own category judgment (perhaps
+        mistakenly) said NOTIFY — this is the part of the old behavior
+        that must NOT have been weakened by the fix.
+        """
+        email = make_email(subject="Important update", body="Please review the attached document.")
+        classification = make_classification(
+            category=Category.NOTIFY, urgency=UrgencyLevel.LOW, risk_flags=[concrete_flag]
+        )
+
+        decision = engine.decide(email, classification, preferences)
+
+        assert decision.category == Category.QUARANTINE
+
+    def test_soft_flag_plus_concrete_flag_forces_quarantine(self, engine, preferences):
+        """A mix of soft and concrete flags is still quarantined — the
+        concrete flag alone is sufficient, regardless of what else is
+        also present.
+        """
+        email = make_email(subject="Confirm your identity", body="Click here: http://not-a-real-bank.invalid")
+        classification = make_classification(
+            category=Category.NOTIFY,
+            risk_flags=[RiskFlag.PHISHING, RiskFlag.SPOOFED_SENDER, RiskFlag.SUSPICIOUS_LINK],
+        )
+
+        decision = engine.decide(email, classification, preferences)
+
+        assert decision.category == Category.QUARANTINE
+
+    def test_quarantine_reasoning_only_lists_the_concrete_flags_that_triggered_it(self, engine, preferences):
+        """The decision reasoning should reflect what actually caused the
+        quarantine, not the full (possibly soft-flag-padded) list.
+        """
+        email = make_email(subject="Confirm your identity", body="Click here: http://not-a-real-bank.invalid")
+        classification = make_classification(
+            category=Category.NOTIFY,
+            risk_flags=[RiskFlag.PHISHING, RiskFlag.SUSPICIOUS_LINK],
+        )
+
+        decision = engine.decide(email, classification, preferences)
+
+        assert "SUSPICIOUS_LINK" in decision.reasoning
+        assert "PHISHING" not in decision.reasoning
+
+    def test_ai_category_quarantine_still_unconditional_regardless_of_flag_type(self, engine, preferences):
+        """category == QUARANTINE from the AI is a separate, still-fully-
+        unconditional trigger — untouched by the concrete-vs-soft
+        distinction, which only applies to the risk_flags check.
+        """
+        email = make_email(subject="Ordinary-looking email", body="Nothing alarming in the wording itself.")
+        classification = make_classification(
+            category=Category.QUARANTINE, urgency=UrgencyLevel.LOW, risk_flags=[RiskFlag.PHISHING]
         )
 
         decision = engine.decide(email, classification, preferences)

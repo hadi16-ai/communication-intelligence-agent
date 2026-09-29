@@ -13,13 +13,14 @@ produces the same `Decision`.
 
 Decision priority (highest to lowest):
 
-    1. SECURITY    Meaningful risk — either the classification itself
-                    (`risk_flags` or `category == QUARANTINE`) or an
-                    explicit user quarantine rule — forces QUARANTINE,
-                    unconditionally. Nothing below this point can override
-                    it: not a protected sender, not "urgent" wording, not
-                    a claimed bank/manager identity, not text inside the
-                    email instructing otherwise.
+    1. SECURITY    Meaningful risk — either a *concrete* risk indicator in
+                    the classification (`risk_flags`, restricted to
+                    `_CONCRETE_THREAT_FLAGS` — see below), `category ==
+                    QUARANTINE`, or an explicit user quarantine rule —
+                    forces QUARANTINE, unconditionally. Nothing below this
+                    point can override it: not a protected sender, not
+                    "urgent" wording, not a claimed bank/manager identity,
+                    not text inside the email instructing otherwise.
     2. PREFERENCE  Explicit, personalized rules decide NOTIFY / MUTE /
                     DIGEST when they clearly apply: protected senders,
                     important topics, and the notify/mute/digest keyword
@@ -39,8 +40,45 @@ the question.
 
 from __future__ import annotations
 
-from app.core.models import Category, ClassificationResult, Decision, DecisionSource, EmailMessage, UrgencyLevel
+from app.core.models import (
+    Category,
+    ClassificationResult,
+    Decision,
+    DecisionSource,
+    EmailMessage,
+    RiskFlag,
+    UrgencyLevel,
+)
 from app.preferences.manager import PreferenceManager, RuleMatch
+
+# Risk flags that represent CONCRETE, verifiable evidence of an active
+# threat (a malicious link, a scam-payment pattern, malware, a dangerous
+# attachment) or an unspecified-but-flagged risk — these force QUARANTINE
+# unconditionally, same as category == QUARANTINE.
+#
+# Deliberately excludes PHISHING, IMPERSONATION, and SPOOFED_SENDER: a
+# real evaluation run (41 real Claude Haiku 4.5 classifications against
+# data/eval_dataset.json) showed the classifier applies these three as a
+# hedge/caution signal on emails it has ALREADY correctly categorized as
+# legitimate (e.g. a genuine bank security alert, or a routine account
+# email from a sender on an unfamiliar-looking domain) — not as a
+# confident threat assessment. Concretely: in that run, all 9 genuine
+# QUARANTINE-labeled emails carried at least one flag from this set;
+# every false-positive escalation (4 legitimate NOTIFY/DIGEST emails
+# incorrectly forced to QUARANTINE) carried only flags outside it. A lone
+# PHISHING/IMPERSONATION/SPOOFED_SENDER flag still reaches the normal
+# category/preference/urgency flow below — it isn't discarded, it just
+# can no longer single-handedly override an AI category judgment the way
+# a concrete artifact can.
+_CONCRETE_THREAT_FLAGS = frozenset(
+    {
+        RiskFlag.SUSPICIOUS_LINK,
+        RiskFlag.MALWARE_RISK,
+        RiskFlag.SCAM,
+        RiskFlag.SUSPICIOUS_ATTACHMENT,
+        RiskFlag.OTHER,
+    }
+)
 
 
 def _describe_match(match: RuleMatch) -> str:
@@ -98,9 +136,16 @@ class DecisionEngine:
         can change the outcome if it returns a result — this is the one
         rule in the engine that a protected sender, urgent wording, or
         text embedded in the email itself must never be able to bypass.
+
+        Only `_CONCRETE_THREAT_FLAGS` trigger this unconditionally — see
+        that constant's docstring for why PHISHING/IMPERSONATION/
+        SPOOFED_SENDER alone do not (they still reach the normal
+        category/preference flow below, they just can't single-handedly
+        override a classification that otherwise judged the email safe).
         """
-        if classification.risk_flags:
-            flags = ", ".join(flag.value for flag in classification.risk_flags)
+        concrete_flags = [flag for flag in classification.risk_flags if flag in _CONCRETE_THREAT_FLAGS]
+        if concrete_flags:
+            flags = ", ".join(flag.value for flag in concrete_flags)
             return (
                 Category.QUARANTINE,
                 DecisionSource.AI_CLASSIFICATION,
