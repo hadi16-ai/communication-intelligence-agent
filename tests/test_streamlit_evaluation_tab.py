@@ -62,6 +62,13 @@ class TestEvaluationTabEmptyDatabase:
         # rather than crashing or being hidden.
         assert any("Evaluated" == m.label for m in at.metric)
 
+    def test_does_not_present_zero_accuracy_without_evaluation_data(self, db_path):
+        at = run_app()
+
+        labels = {metric.label for metric in at.metric}
+        assert "Classification accuracy" not in labels
+        assert any("No evaluation data yet" in info.value for info in at.info)
+
 
 class TestEvaluationTabPartialCoverage:
     def test_reports_partial_coverage_correctly(self, db_path):

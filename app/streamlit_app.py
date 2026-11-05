@@ -63,6 +63,7 @@ from app.ui.evaluation_view import (
     mismatch_rows,
 )
 from app.ui.gmail_view import format_sync_summary, gmail_is_connected, sync_gmail
+from app.ui.style import apply_design_system, card, hero
 
 
 def _load_secrets_into_env() -> None:
@@ -154,8 +155,10 @@ def _get_pipeline_classifier(settings: Settings):
 
 
 def render_header() -> None:
-    st.title("Communication Intelligence Agent")
-    st.caption("Personalized email triage: Notify, Digest, Mute, or Quarantine.")
+    hero(
+        "Your communication, intelligently routed.",
+        "A focused decision workspace for knowing what deserves attention, what can wait, and what needs care.",
+    )
 
 
 def render_sidebar(settings: Settings, records) -> None:
@@ -164,15 +167,15 @@ def render_sidebar(settings: Settings, records) -> None:
     from anywhere in the app, not just the Gmail tab.
     """
     with st.sidebar:
-        st.subheader("📬 Communication Intelligence Agent")
-        st.caption("AI email triage: Notify · Digest · Mute · Quarantine.")
+        st.subheader("Signal desk")
+        st.caption("Personalized email triage")
         st.divider()
-        st.markdown("**Configuration**")
-        active_model = settings.anthropic_model if settings.ai_provider.lower() == "anthropic" else settings.gemini_model
-        st.caption(f"AI provider: `{settings.ai_provider}` (`{active_model}`)")
-        st.caption(f"Database: `{settings.database_path}`")
+        st.markdown("**Workspace status**")
+        st.caption(f"AI analysis: **{settings.ai_provider.title()}**")
         if records:
-            st.caption(f"{len(records)} email(s) processed so far.")
+            st.caption(f"{len(records)} email(s) in this workspace.")
+        else:
+            st.caption("No decisions saved yet.")
         st.divider()
         st.info(
             "🔒 Gmail access, when connected, is **read-only**. This app "
@@ -194,6 +197,47 @@ def render_summary(summary, records) -> None:
     urgency_cols = st.columns(3)
     for col, level in zip(urgency_cols, UrgencyLevel):
         col.metric(f"Urgency: {level.value}", urgency_counts[level])
+
+
+def render_overview_tab(repository: EmailRepository) -> None:
+    records = load_records(repository)
+    summary = summarize(records)
+    urgent = urgency_breakdown(records)[UrgencyLevel.HIGH]
+    st.markdown('<div class="cia-section-kicker">Decision overview</div>', unsafe_allow_html=True)
+    st.subheader("A calm view of what needs attention")
+    cards = st.columns(5)
+    with cards[0]:
+        card("Processed", summary.total, "Stored decisions")
+    with cards[1]:
+        card("Important", summary.notify, "Notify decisions", tone="notify")
+    with cards[2]:
+        card("Urgent", urgent, "High AI urgency")
+    with cards[3]:
+        card("Suspicious", summary.quarantine, "Quarantined", tone="quarantine")
+    with cards[4]:
+        card("Muted", summary.mute, "Low-priority", tone="mute")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    left, right = st.columns([1.45, 1])
+    with left:
+        st.subheader("Recent AI decisions")
+        if not records:
+            st.info("No decisions yet. Load the sample workflow from Intelligent Inbox, or connect Gmail when your private deployment is ready.")
+        else:
+            for record in recent_activity(records):
+                decision = record.decision.category.value if record.decision else "PENDING"
+                st.caption(f"{decision} · {record.subject or '(no subject)'} · {record.sender}")
+    with right:
+        st.subheader("Sync status")
+        connected = gmail_is_connected(Settings().gmail_token_path)
+        if connected:
+            st.success("Gmail token available")
+            st.caption("Manual synchronization is currently enabled. Account identity and sync history are not persisted yet.")
+        else:
+            st.warning("Gmail not connected")
+            st.caption("Connect via the Gmail & notifications section. No mailbox actions are available in this app.")
+        st.subheader("How decisions work")
+        st.caption("AI understands the message. Your deterministic preference rules make the final routing decision. Security signals always take priority.")
 
 
 def render_filters(records):
@@ -227,7 +271,7 @@ def render_filters(records):
 
 
 def render_table(filtered_records) -> None:
-    st.subheader(f"Emails ({len(filtered_records)})")
+    st.subheader(f"Decision queue ({len(filtered_records)})")
     if not filtered_records:
         st.caption("No emails match the current filter.")
         return
@@ -249,7 +293,7 @@ def render_detail(filtered_records) -> None:
     if not filtered_records:
         return
 
-    st.subheader("Decision trace")
+    st.subheader("Decision inspection")
     options = {
         f"{r.subject or '(no subject)'} — {r.sender} [{r.message_id}]": r.message_id
         for r in filtered_records
@@ -266,12 +310,13 @@ def render_detail(filtered_records) -> None:
     elif classification.risk_flags:
         st.warning(f"⚠️ Risk indicators present: {format_risk_flags(classification.risk_flags)}")
 
-    st.markdown("**Email → Classification → Preferences → Decision**")
+    st.caption("Stored email metadata → AI classification → preference rules → final decision")
 
     class_col, decision_col = st.columns(2)
 
     with class_col:
-        st.markdown("#### Classification")
+        st.markdown("#### AI classification")
+        st.caption(f"From: {record.sender} · Received: {record.received_at.strftime('%d %b %Y, %H:%M')}")
         st.write(f"**Category (AI suggestion):** {classification.category.value}")
         st.write(f"**Urgency:** {classification.urgency.value}")
         st.write(f"**Confidence:** {classification.confidence:.2f}")
@@ -283,7 +328,7 @@ def render_detail(filtered_records) -> None:
         st.caption(classification.reasoning)
 
     with decision_col:
-        st.markdown("#### Decision")
+        st.markdown("#### Final routing decision")
         if decision is None:
             st.info("This email has been classified but not yet decided.")
         else:
@@ -309,17 +354,16 @@ def render_demo_loader(repository: EmailRepository) -> None:
         getattr(st, kind)(message)
 
     st.info(
-        "No processed emails yet. This dashboard only reads existing data — "
-        "it never calls Gemini automatically."
+        "No processed emails yet. This workspace only analyzes messages when you explicitly ask it to."
     )
     st.caption(
-        f"Try it now: classify {DEFAULT_DEMO_COUNT} sample emails with the real "
-        "AI pipeline, or connect Gmail in the 📧 tab."
+        f"Try it now: classify {DEFAULT_DEMO_COUNT} sample emails with the configured "
+        "AI pipeline, or use Gmail & notifications to review secure connection requirements."
     )
     if st.button("✨ Load demo emails"):
         settings = Settings()
         try:
-            with st.spinner("Classifying demo emails with Gemini..."):
+            with st.spinner("Classifying sample emails with AI..."):
                 processor = EmailProcessor(
                     classifier=_get_pipeline_classifier(settings),
                     preferences=_get_preferences(),
@@ -352,6 +396,9 @@ def render_recent_activity(records) -> None:
 
 def render_inbox_tab(repository: EmailRepository) -> None:
     records = load_records(repository)
+
+    st.markdown('<div class="cia-section-kicker">Intelligent inbox</div>', unsafe_allow_html=True)
+    st.subheader("Understand the recommendation before you act")
 
     if not records:
         render_demo_loader(repository)
@@ -389,16 +436,18 @@ def render_evaluation_tab(repository: EmailRepository) -> None:
     else:
         st.success(message)
 
-    st.subheader("Overview")
-    overview_cols = st.columns(4)
+    st.markdown('<div class="cia-section-kicker">Evaluation & insights</div>', unsafe_allow_html=True)
+    st.subheader("Quality signals, clearly presented")
+    overview_cols = st.columns(4 if coverage.evaluated_count else 3)
     overview_cols[0].metric("Evaluated", coverage.evaluated_count)
     overview_cols[1].metric("Total in dataset", coverage.total_count)
     overview_cols[2].metric("Coverage", f"{coverage.coverage_percent:.1f}%")
-    overview_cols[3].metric("Classification accuracy", f"{report.classification.accuracy * 100:.1f}%")
 
     if coverage.evaluated_count == 0:
-        st.info("Nothing has been evaluated yet — no stored classifications match the dataset.")
+        st.info("No evaluation data yet. Classification accuracy will appear after stored decisions match the evaluation dataset.")
         return
+
+    overview_cols[3].metric("Classification accuracy", f"{report.classification.accuracy * 100:.1f}%")
 
     st.divider()
     st.subheader("🛡️ Safety-critical metrics")
@@ -464,6 +513,27 @@ _GMAIL_SYNC_MESSAGE_KEY = "gmail_sync_message"
 _GMAIL_SYNC_FAILURES_KEY = "gmail_sync_failures"
 
 
+def render_preferences_tab() -> None:
+    """Truthful read-only view until account-scoped preference editing exists."""
+    preferences = _get_preferences().preferences
+    st.markdown('<div class="cia-section-kicker">Preferences</div>', unsafe_allow_html=True)
+    st.subheader("Your current routing rules")
+    st.info("Preferences are active in every final decision. Editing is intentionally not exposed here yet because this deployment does not have account-scoped persistence.")
+    columns = st.columns(3)
+    with columns[0]:
+        st.markdown("#### Important senders & topics")
+        st.caption("Protected senders: " + (", ".join(preferences.protected_senders) or "—"))
+        st.caption("Priority topics: " + (", ".join(preferences.important_topics) or "—"))
+    with columns[1]:
+        st.markdown("#### Lower-priority routing")
+        st.caption("Mute signals: " + (", ".join(preferences.mute_rules.keywords) or "—"))
+        st.caption("Digest signals: " + (", ".join(preferences.digest_rules.keywords) or "—"))
+    with columns[2]:
+        st.markdown("#### Safety routing")
+        st.caption("Quarantine signals: " + (", ".join(preferences.quarantine_rules.keywords) or "—"))
+        st.caption("Security routing cannot be overridden by a preference rule.")
+
+
 def render_gmail_tab(repository: EmailRepository) -> None:
     """Lets the user manually pull a small number of recent Gmail
     messages through the existing pipeline. Read-only: no send, delete,
@@ -478,6 +548,9 @@ def render_gmail_tab(repository: EmailRepository) -> None:
     unrelated interaction.
     """
     settings = Settings()
+
+    st.markdown('<div class="cia-section-kicker">Gmail & notifications</div>', unsafe_allow_html=True)
+    st.subheader("Connection and sync")
 
     st.info(
         "🔒 **Read-only Gmail access.** This application can only read your inbox. "
@@ -496,6 +569,7 @@ def render_gmail_tab(repository: EmailRepository) -> None:
 
     if not gmail_is_connected(settings.gmail_token_path):
         st.warning("Gmail is not connected yet.")
+        st.caption("This public deployment deliberately does not offer a shared-mailbox connect button. A secure, account-scoped OAuth flow is the next backend milestone.")
         st.markdown(
             "Run this once from a terminal (not from inside Streamlit) to connect your "
             "Gmail account with **read-only** access:"
@@ -545,6 +619,7 @@ def render_gmail_tab(repository: EmailRepository) -> None:
 
 
 def main() -> None:
+    apply_design_system()
     render_header()
 
     settings = Settings()
@@ -553,11 +628,17 @@ def main() -> None:
 
     render_sidebar(settings, load_records(repository))
 
-    inbox_tab, evaluation_tab, gmail_tab = st.tabs(["📥 Inbox", "📊 Evaluation", "📧 Gmail"])
+    overview_tab, inbox_tab, evaluation_tab, preferences_tab, gmail_tab = st.tabs(
+        ["Overview", "Intelligent Inbox", "Evaluation & Insights", "Preferences", "Gmail & Notifications"]
+    )
+    with overview_tab:
+        render_overview_tab(repository)
     with inbox_tab:
         render_inbox_tab(repository)
     with evaluation_tab:
         render_evaluation_tab(repository)
+    with preferences_tab:
+        render_preferences_tab()
     with gmail_tab:
         render_gmail_tab(repository)
 

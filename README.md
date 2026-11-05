@@ -46,24 +46,14 @@ milestone table below.
 | M6 | SQLite storage and caching | ✅ |
 | M7 | End-to-end synthetic pipeline | ✅ |
 | M8 | Streamlit dashboard | ✅ |
-| M9 | Evaluation and quality metrics | ✅ (architecture complete; **data partial**, see below) |
+| M9 | Evaluation and quality metrics | ✅ (architecture complete; latest checked-in run: 41/41) |
 | M10 | Gmail read-only integration | ✅ |
 
-**Version 1 is now architecturally complete.** The only remaining work before
-declaring V1 done is operational, not architectural: resolve the Gemini
-billing/rate-limit issue, run the one-off paid-tier verification, process
-the remaining 35 evaluation emails, and confirm a full 41/41 evaluation —
-see "Evaluation" below.
-
-**A note on real Gemini usage:** a live 41-email evaluation run against the
-real Gemini API was started and hit a free-tier rate limit (5 requests/min)
-after 6 successful calls, before billing was fully configured. Those 6 real
-classifications remain cached in `data/app.db` (never overwritten or
-deleted). The evaluation architecture built in M9 was deliberately designed
-to report this honestly as a **partial** evaluation (6 of 41) rather than
-hide or extrapolate from it — see "Evaluation" below. The remaining 35
-emails will be processed once billing is confirmed working; no code changes
-will be needed to do that.
+**Version 1 is architecturally complete.** The latest checked-in evaluation
+report records a full 41/41 Claude run; see
+[`eval_results/report_20260929_192500.md`](eval_results/report_20260929_192500.md).
+The deployed dashboard may still show partial or empty coverage because its
+local SQLite database is ephemeral on Streamlit Community Cloud.
 
 Version 1 is strictly read-only with respect to Gmail: it only **READ**s,
 **CLASSIFY**s, and **DECIDE**s — it never acts on the mailbox (no send, no
@@ -219,19 +209,16 @@ Prints coverage, overall and per-category classification/decision metrics,
 both confusion matrices, the safety-critical recall figures, and any
 mismatched records — reading only the existing SQLite database
 (`Settings.database_path`, default `data/app.db`). Makes zero network
-calls, so it's safe to run at any time regardless of Gemini/billing status.
+calls, so it's safe to run at any time regardless of provider or billing status.
 
-The same report also renders as a "📊 Evaluation" tab in the Streamlit
-dashboard (`streamlit run app/streamlit_app.py`), alongside the existing
-"📥 Inbox" tab.
+The same report also renders in the **Evaluation & Insights** section of the
+Streamlit dashboard (`streamlit run app/streamlit_app.py`).
 
-**Once Gemini access is restored:** running the existing M7 pipeline
-(`scripts/run_synthetic_pipeline.py`, or `EmailProcessor` directly) against
-the remaining 35 emails will populate the rest of `data/app.db` — the
-already-cached 6 are never re-classified, since caching is keyed by
-`message_id` (M6). No change to the evaluation architecture is needed: the
-same `python scripts/run_evaluation.py` command, and the same dashboard
-tab, will automatically report full 41/41 coverage once those rows exist.
+**Evaluation coverage is environment-specific.** The checked-in report is a
+full 41/41 run, while a fresh local or Streamlit Cloud database starts empty.
+Running the existing pipeline with the configured provider repopulates the
+database; message-id caching prevents already-classified messages from being
+sent for classification again.
 
 ## V1 Gmail Integration
 
