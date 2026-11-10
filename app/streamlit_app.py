@@ -63,7 +63,7 @@ from app.ui.evaluation_view import (
     mismatch_rows,
 )
 from app.ui.gmail_view import format_sync_summary, gmail_is_connected, sync_gmail
-from app.ui.style import apply_design_system, card, hero
+from app.ui.style import apply_design_system, card, empty_state, hero
 
 
 def _load_secrets_into_env() -> None:
@@ -149,15 +149,15 @@ def _get_gmail_client(settings: Settings) -> GmailClient:
 
 def _get_pipeline_classifier(settings: Settings):
     """Isolated so tests can monkeypatch this one function to inject a
-    fake classifier rather than making a real Gemini call.
+    fake classifier rather than making a real configured-provider call.
     """
     return get_classifier(settings)
 
 
 def render_header() -> None:
     hero(
-        "Your communication, intelligently routed.",
-        "A focused decision workspace for knowing what deserves attention, what can wait, and what needs care.",
+        "Communication intelligence, clearly prioritized.",
+        "Review what matters, understand why, and route every message with confidence.",
     )
 
 
@@ -205,28 +205,34 @@ def render_overview_tab(repository: EmailRepository) -> None:
     urgent = urgency_breakdown(records)[UrgencyLevel.HIGH]
     st.markdown('<div class="cia-section-kicker">Decision overview</div>', unsafe_allow_html=True)
     st.subheader("A calm view of what needs attention")
+    if not records:
+        empty_state(
+            "Your decision workspace is ready.",
+            "Process the sample set from Intelligent Inbox to see priority, urgency, and routing insights appear here.",
+        )
+        return
+
     cards = st.columns(5)
     with cards[0]:
-        card("Processed", summary.total, "Stored decisions")
+        card("Processed", summary.total, "Stored decisions", icon="◌")
     with cards[1]:
-        card("Important", summary.notify, "Notify decisions", tone="notify")
+        card("Important", summary.notify, "Notify decisions", tone="notify", icon="●")
     with cards[2]:
-        card("Urgent", urgent, "High AI urgency")
+        card("Urgent", urgent, "High AI urgency", tone="teal", icon="↗")
     with cards[3]:
-        card("Suspicious", summary.quarantine, "Quarantined", tone="quarantine")
+        card("Suspicious", summary.quarantine, "Quarantined", tone="quarantine", icon="◆")
     with cards[4]:
-        card("Muted", summary.mute, "Low-priority", tone="mute")
+        card("Muted", summary.mute, "Low-priority", tone="mute", icon="–")
 
     st.markdown("<br>", unsafe_allow_html=True)
     left, right = st.columns([1.45, 1])
     with left:
         st.subheader("Recent AI decisions")
-        if not records:
-            st.info("No decisions yet. Load the sample workflow from Intelligent Inbox, or connect Gmail when your private deployment is ready.")
-        else:
-            for record in recent_activity(records):
-                decision = record.decision.category.value if record.decision else "PENDING"
-                st.caption(f"{decision} · {record.subject or '(no subject)'} · {record.sender}")
+        for record in recent_activity(records):
+            decision = record.decision.category.value if record.decision else "PENDING"
+            with st.container(border=True):
+                st.write(f"**{decision}** · {record.subject or '(no subject)'}")
+                st.caption(record.sender)
     with right:
         st.subheader("Sync status")
         connected = gmail_is_connected(Settings().gmail_token_path)
@@ -238,6 +244,15 @@ def render_overview_tab(repository: EmailRepository) -> None:
             st.caption("Connect via the Gmail & notifications section. No mailbox actions are available in this app.")
         st.subheader("How decisions work")
         st.caption("AI understands the message. Your deterministic preference rules make the final routing decision. Security signals always take priority.")
+        st.subheader("Classification distribution")
+        for label, count, tone in [
+            ("Notify", summary.notify, "var(--cia-coral)"),
+            ("Digest", summary.digest, "var(--cia-blue)"),
+            ("Mute", summary.mute, "var(--cia-slate)"),
+            ("Quarantine", summary.quarantine, "var(--cia-amber)"),
+        ]:
+            width = int(count / summary.total * 100) if summary.total else 0
+            st.markdown(f'<div class="cia-distribution-row"><span class="cia-distribution-label">{label}</span><span class="cia-distribution-track"><span class="cia-distribution-fill" style="width:{width}%;background:{tone}"></span></span><span class="cia-distribution-count">{count}</span></div>', unsafe_allow_html=True)
 
 
 def render_filters(records):
@@ -275,10 +290,14 @@ def render_table(filtered_records) -> None:
     if not filtered_records:
         st.caption("No emails match the current filter.")
         return
-    rows = [to_table_row(r) for r in filtered_records]
+    rows = []
+    for record in filtered_records:
+        row = to_table_row(record)
+        row["summary"] = record.classification.summary
+        rows.append(row)
     st.dataframe(
         rows,
-        column_order=["sender", "subject", "received_at", "decision", "urgency", "confidence", "risk_flags"],
+        column_order=["sender", "subject", "summary", "received_at", "decision", "urgency", "confidence", "risk_flags"],
         column_config={
             "confidence": st.column_config.ProgressColumn(
                 "confidence", min_value=0.0, max_value=1.0, format="%.2f"
@@ -347,7 +366,7 @@ def render_demo_loader(repository: EmailRepository) -> None:
     handful of the existing shipped synthetic emails (data/eval_dataset.json,
     already used for M9 evaluation) through the real, unmodified pipeline.
     Safe to click more than once — already-classified demo emails are
-    served from the cache rather than re-sent to Gemini.
+    served from the cache rather than re-sent to the configured provider.
     """
     if _DEMO_MESSAGE_KEY in st.session_state:
         kind, message = st.session_state.pop(_DEMO_MESSAGE_KEY)
@@ -404,23 +423,32 @@ def render_inbox_tab(repository: EmailRepository) -> None:
         render_demo_loader(repository)
         return
 
+    filtered_records = render_filters(records)
     summary = summarize(records)
     render_summary(summary, records)
     st.divider()
-
-    render_recent_activity(records)
-    st.divider()
-
-    filtered_records = render_filters(records)
-    render_table(filtered_records)
-    st.divider()
-    render_detail(filtered_records)
+    workspace_nav, workspace_list, workspace_detail = st.columns([0.75, 1.45, 1.25])
+    with workspace_nav:
+        st.markdown("#### Decision states")
+        st.caption("Final routing is shown separately from the AI assessment.")
+        st.caption(f"🔴 Notify · {summary.notify}")
+        st.caption(f"🔵 Digest · {summary.digest}")
+        st.caption(f"⚪ Mute · {summary.mute}")
+        st.caption(f"🟠 Quarantine · {summary.quarantine}")
+        st.divider()
+        st.markdown("#### Queue context")
+        st.caption(f"{len(filtered_records)} messages match the active filters.")
+        st.caption("Select a message to compare the model assessment with the final rule-based decision.")
+    with workspace_list:
+        render_table(filtered_records)
+    with workspace_detail:
+        render_detail(filtered_records)
 
 
 def render_evaluation_tab(repository: EmailRepository) -> None:
     """Read-only evaluation of stored classifications/decisions against
     data/eval_dataset.json ground truth. Computes nothing itself beyond
-    calling app.evaluation.evaluate() — no Gemini call, no metric math
+    calling app.evaluation.evaluate() — no provider call, no metric math
     lives in this file (see app/evaluation and app/ui/evaluation_view.py).
     """
     preferences = _get_preferences()

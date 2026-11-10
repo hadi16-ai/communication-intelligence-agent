@@ -94,6 +94,16 @@ class TestPopulatedDashboard:
         assert len(at.dataframe) == 1
         assert len(at.dataframe[0].value) == 2
 
+    def test_queue_includes_the_ai_summary_but_never_raw_email_body(self, db_path):
+        seed(db_path, "msg-1", Category.NOTIFY)
+
+        at = AppTest.from_file(APP_PATH, default_timeout=15)
+        at.run()
+
+        columns = {str(column).lower() for column in at.dataframe[0].value.columns}
+        assert "summary" in columns
+        assert "body" not in columns
+
     def test_filtering_by_category_reduces_table(self, db_path):
         seed(db_path, "msg-1", Category.NOTIFY)
         seed(db_path, "msg-2", Category.DIGEST)
